@@ -23,28 +23,40 @@ pub fn aka_password(res: &[u8]) -> String {
     ims_aka_response(res)
 }
 
+/// Inputs to one RFC 2617 Digest computation.
+#[derive(Debug, Clone, Copy)]
+pub struct DigestInput<'a> {
+    pub impi: &'a str,
+    pub realm: &'a str,
+    pub res: &'a [u8],
+    pub method: &'a Method,
+    pub digest_uri: &'a str,
+    pub nonce: &'a str,
+    pub nc: &'a str,
+    pub cnonce: &'a str,
+    pub qop: Option<&'a str>,
+}
+
 /// Compute the RFC 2617 Digest `response` value for an IMS AKA challenge.
 ///
 /// * `HA1 = MD5(IMPI ":" realm ":" HEX(RES))` (RFC 3310 §3.2)
 /// * `HA2 = MD5(method ":" digest-uri)`
 /// * `response = MD5(HA1 ":" nonce ":" nc ":" cnonce ":" qop ":" HA2)` when qop
 ///   is present, else `MD5(HA1 ":" nonce ":" HA2)`.
-pub fn digest_response(
-    impi: &str,
-    realm: &str,
-    res: &[u8],
-    method: &Method,
-    digest_uri: &str,
-    nonce: &str,
-    nc: &str,
-    cnonce: &str,
-    qop: Option<&str>,
-) -> String {
-    let ha1 = md5_hex(&format!("{impi}:{realm}:{}", aka_password(res)));
-    let ha2 = md5_hex(&format!("{method}:{digest_uri}"));
-    match qop {
-        Some(qop) => md5_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}")),
-        None => md5_hex(&format!("{ha1}:{nonce}:{ha2}")),
+pub fn digest_response(input: &DigestInput<'_>) -> String {
+    let ha1 = md5_hex(&format!(
+        "{}:{}:{}",
+        input.impi,
+        input.realm,
+        aka_password(input.res)
+    ));
+    let ha2 = md5_hex(&format!("{}:{}", input.method, input.digest_uri));
+    match input.qop {
+        Some(qop) => md5_hex(&format!(
+            "{ha1}:{}:{}:{}:{qop}:{ha2}",
+            input.nonce, input.nc, input.cnonce
+        )),
+        None => md5_hex(&format!("{ha1}:{}:{ha2}", input.nonce)),
     }
 }
 
@@ -64,8 +76,8 @@ pub fn authorization_value(
     let algorithm = challenge.param("algorithm").unwrap_or("AKAv1-MD5");
     let qop = challenge.param("qop");
     let nc = "00000001";
-    let response = digest_response(
-        &profile.private_identity,
+    let response = digest_response(&DigestInput {
+        impi: &profile.private_identity,
         realm,
         res,
         method,
@@ -74,7 +86,7 @@ pub fn authorization_value(
         nc,
         cnonce,
         qop,
-    );
+    });
 
     let mut out = format!(
         "Digest username=\"{}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{digest_uri}\", response=\"{response}\", algorithm={algorithm}",
@@ -105,17 +117,17 @@ mod tests {
     #[test]
     fn aka_digest_uses_hex_res() {
         let res = [0xa5, 0x42, 0x11, 0xd5, 0xe3, 0xba, 0x50, 0xbf];
-        let r = digest_response(
-            "234150123456789@ims.mnc015.mcc234.3gppnetwork.org",
-            "ims.mnc015.mcc234.3gppnetwork.org",
-            &res,
-            &Method::Register,
-            "sip:ims.mnc015.mcc234.3gppnetwork.org",
-            "bm9uY2U=",
-            "00000001",
-            "0a4f113b",
-            Some("auth"),
-        );
+        let r = digest_response(&DigestInput {
+            impi: "234150123456789@ims.mnc015.mcc234.3gppnetwork.org",
+            realm: "ims.mnc015.mcc234.3gppnetwork.org",
+            res: &res,
+            method: &Method::Register,
+            digest_uri: "sip:ims.mnc015.mcc234.3gppnetwork.org",
+            nonce: "bm9uY2U=",
+            nc: "00000001",
+            cnonce: "0a4f113b",
+            qop: Some("auth"),
+        });
         assert_eq!(r.len(), 32);
         assert!(r
             .chars()

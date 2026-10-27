@@ -3,6 +3,7 @@
 //! Values are configuration (public identities, home domain, P-CSCF discovery
 //! result, security parameters). They are not derived from vendor binaries.
 
+use carrier::CarrierProfile;
 use sip::split_params;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +116,10 @@ pub struct ImsProfile {
     pub contact_port: u16,
     pub register_expires: u32,
     pub supported: Vec<String>,
+    /// Signalling transport token for Via (`UDP` or `TCP`).
+    pub transport: String,
+    /// AMR-WB mode-set to offer in SDP. Empty means do not offer AMR-WB.
+    pub amr_wb_modes: Vec<u8>,
 }
 
 impl ImsProfile {
@@ -143,7 +148,56 @@ impl ImsProfile {
             contact_port: 5060,
             register_expires: 600_000,
             supported: vec!["path".into(), "100rel".into()],
+            transport: "UDP".into(),
+            amr_wb_modes: vec![0, 1, 2, 3, 4, 5, 6, 7],
         }
+    }
+
+    /// Build the runtime IMS profile from a carrier TOML profile plus the
+    /// subscriber's IMSI (the carrier file cannot know the SIM identity).
+    ///
+    /// The P-CSCF list is the carrier's static list with `p_cscf_ports[0]`
+    /// applied to entries that do not already carry a port. Discovery modes
+    /// other than `static` still require the caller/modem to fill `p_cscf`.
+    pub fn from_carrier(carrier: &CarrierProfile, imsi: &str) -> Self {
+        let home_domain = carrier.ims_domain();
+        let default_port = carrier.p_cscf_ports.first().copied();
+        let p_cscf = carrier
+            .p_cscf
+            .iter()
+            .map(|host| match default_port {
+                Some(port) => with_default_port(host, port),
+                None => host.clone(),
+            })
+            .collect();
+        Self {
+            private_identity: format!("{imsi}@{home_domain}"),
+            public_identity: format!("sip:{imsi}@{home_domain}"),
+            home_domain: home_domain.clone(),
+            realm: home_domain,
+            p_cscf,
+            service_route: Vec::new(),
+            security_clients: vec![SecurityClient::ipsec(
+                "hmac-md5-96",
+                10_000,
+                10_001,
+                5062,
+                5064,
+            )],
+            user_agent: carrier.ua.clone(),
+            feature_tags: carrier.feature_tags.clone(),
+            contact_host: "127.0.0.1".into(),
+            contact_port: 5060,
+            register_expires: u32::try_from(carrier.timers.register_expires_s).unwrap_or(u32::MAX),
+            supported: vec!["path".into(), "100rel".into()],
+            transport: "UDP".into(),
+            amr_wb_modes: carrier.amr_wb_modes.clone(),
+        }
+    }
+
+    /// SDP offer using this profile's AMR-WB mode policy.
+    pub fn amr_wb_offer(&self, address: &str, telephone_event: bool) -> crate::Sdp {
+        crate::Sdp::amr_wb_offer(&self.amr_wb_modes, telephone_event, address)
     }
 
     /// IMPU without the `sip:` scheme, suitable for the Contact user part.
@@ -182,6 +236,30 @@ impl ImsProfile {
     }
 }
 
+/// Append `port` unless the endpoint already has an explicit numeric port.
+fn with_default_port(host: &str, port: u16) -> String {
+    if host.starts_with('[') {
+        let has_port = host
+            .rsplit_once(']')
+            .map(|(_, tail)| tail.starts_with(':'))
+            .unwrap_or(false);
+        return if has_port {
+            host.to_string()
+        } else {
+            format!("{host}:{port}")
+        };
+    }
+    if let Some((_, tail)) = host.rsplit_once(':') {
+        if !host[..host.len() - tail.len() - 1].contains(':')
+            && !tail.is_empty()
+            && tail.chars().all(|c| c.is_ascii_digit())
+        {
+            return host.to_string();
+        }
+    }
+    format!("{host}:{port}")
+}
+
 impl Default for ImsProfile {
     fn default() -> Self {
         Self::lab_default()
@@ -207,5 +285,33 @@ mod tests {
         assert_eq!(p.contact_uri(), "sip:001010000000001@192.0.2.10:5060");
         assert_eq!(p.public_user(), "001010000000001");
         assert!(p.feature_contact_params().contains("+g.3gpp.icsi-ref="));
+    }
+
+    #[test]
+    fn carrier_builds_ims_profile_and_policy() {
+        let c = CarrierProfile::lab();
+        let p = ImsProfile::from_carrier(&c, "001010000000001");
+        assert_eq!(
+            p.private_identity,
+            "001010000000001@ims.mnc001.mcc001.3gppnetwork.org"
+        );
+        assert_eq!(
+            p.public_identity,
+            "sip:001010000000001@ims.mnc001.mcc001.3gppnetwork.org"
+        );
+        assert_eq!(
+            p.p_cscf,
+            vec!["pcscf.ims.mnc001.mcc001.3gppnetwork.org:5060"]
+        );
+        assert_eq!(p.user_agent, c.ua);
+        assert_eq!(p.feature_tags, c.feature_tags);
+        assert_eq!(p.amr_wb_modes, c.amr_wb_modes);
+        let offer = p.amr_wb_offer("192.0.2.10", true);
+        assert!(offer
+            .audio()
+            .unwrap()
+            .fmtp(116)
+            .unwrap()
+            .contains("mode-set=0,1,2,3,4,5,6,7"));
     }
 }

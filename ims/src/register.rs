@@ -117,8 +117,28 @@ impl Registration {
 
     /// Build the challenged REGISTER. `res` is the 8-byte AKA RES from the USIM.
     pub fn authorize(&mut self, challenge: &Challenge, res: &[u8], cnonce: &str) -> Request {
+        self.authorize_with_expires(challenge, res, cnonce, self.profile.register_expires)
+    }
+
+    /// Build the challenged deregistration (`Expires: 0`).
+    pub fn authorize_deregister(
+        &mut self,
+        challenge: &Challenge,
+        res: &[u8],
+        cnonce: &str,
+    ) -> Request {
+        self.authorize_with_expires(challenge, res, cnonce, 0)
+    }
+
+    fn authorize_with_expires(
+        &mut self,
+        challenge: &Challenge,
+        res: &[u8],
+        cnonce: &str,
+        expires: u32,
+    ) -> Request {
         let mut req = self.request(Method::Register, self.profile.register_uri());
-        self.apply_register_headers(&mut req, self.profile.register_expires);
+        self.apply_register_headers(&mut req, expires);
         let auth = authorization_value(
             &challenge.challenge,
             &self.profile,
@@ -137,7 +157,11 @@ impl Registration {
             req.headers
                 .push(Header::new("Security-Verify", server.clone()));
         }
-        self.state = RegistrationState::Registering;
+        self.state = if expires == 0 {
+            RegistrationState::Deregistering
+        } else {
+            RegistrationState::Registering
+        };
         req
     }
 
@@ -189,7 +213,6 @@ impl Registration {
     /// A USIM/ISIM challenge normally arrives as `RAND`+`AUTN`; this helper is
     /// for tests and for integrations that keep them together.
     pub fn rand_autn_from_response(response: &Response) -> Option<(Rand, [u8; 16])> {
-        let value = response.headers.get("authentication-info")?;
         // Lab-only convenience: nonce carries base64 of RAND||AUTN in the test
         // fixtures. Real deployments feed RAND/AUTN from the USIM API instead.
         let nonce = response
@@ -198,7 +221,6 @@ impl Registration {
             .or_else(|| response.headers.get("proxy-authenticate"))
             .and_then(|v| sip::parse_challenge(v).ok())
             .and_then(|c| c.param("nonce").map(str::to_string))?;
-        let _ = value;
         let bytes = base64_decode(&nonce)?;
         if bytes.len() != 32 {
             return None;
@@ -218,8 +240,8 @@ impl Registration {
         headers.push(Header::new(
             "Via",
             format!(
-                "SIP/2.0/UDP {}:{};branch={branch};rport",
-                self.profile.contact_host, self.profile.contact_port
+                "SIP/2.0/{} {}:{};branch={branch};rport",
+                self.profile.transport, self.profile.contact_host, self.profile.contact_port
             ),
         ));
         headers.push(Header::new("Max-Forwards", "70"));

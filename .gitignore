@@ -2,3 +2,4 @@ target/
 *.png
 !docs/img/*.svg
 .DS_Store
+.worktrees/

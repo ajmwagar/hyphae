@@ -19,6 +19,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod net;
+
 use sip::Message;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};

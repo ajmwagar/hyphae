@@ -8,6 +8,7 @@ members = [
     "codec",
     "codec-amr",
     "transport",
+    "cli",
     "tests/conformance",
 ]
 

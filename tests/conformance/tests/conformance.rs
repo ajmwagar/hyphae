@@ -97,6 +97,28 @@ fn reg_004_authorized_register_has_digest() {
 }
 
 #[test]
+fn sec_001_security_server_echoed_as_security_verify() {
+    let mut reg = Registration::new(ImsProfile::lab_default());
+    let _ = reg.register_request();
+    let Message::Response(resp) = sip("challenge_401.sip") else {
+        panic!("response expected")
+    };
+    let expected = resp
+        .headers
+        .get("security-server")
+        .expect("fixture has Security-Server")
+        .to_string();
+    let RegistrationEvent::Challenge(challenge) = reg.on_response(&resp) else {
+        panic!("challenge expected")
+    };
+    let auth = reg.authorize(&challenge, &RES, "0a4f113b");
+    let verify: Vec<&str> = auth.headers.get_all("security-verify").collect();
+    assert_eq!(verify, vec![expected.as_str()]);
+    assert!(verify[0].contains("alg=hmac-md5-96"));
+    assert!(verify[0].contains("spi-c=20000"));
+}
+
+#[test]
 fn reg_005_407_proxy_challenge_handling() {
     let mut reg = Registration::new(ImsProfile::lab_default());
     let _ = reg.register_request();
@@ -300,6 +322,23 @@ fn dialog_001_update_and_bye() {
 }
 
 // --- Carrier / profiles ---------------------------------------------------
+
+#[test]
+fn carrier_002_amr_wb_modes_feed_sdp_offer() {
+    let c = carrier::CarrierProfile::lab();
+    let profile = ImsProfile::from_carrier(&c, "001010000000001");
+    let offer = profile.amr_wb_offer("192.0.2.10", true);
+    let m = offer.audio().expect("audio m-line");
+    let fmtp = m.fmtp(116).unwrap();
+    let expected = c
+        .amr_wb_modes
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(fmtp.contains(&format!("mode-set={expected}")));
+    assert!(fmtp.contains("octet-align=1"));
+}
 
 #[test]
 fn carrier_001_lab_profile_loads() {

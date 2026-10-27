@@ -9,4 +9,5 @@ rust-version.workspace = true
 [dependencies]
 sip.workspace = true
 aka.workspace = true
+carrier.workspace = true
 md5 = "0.7"

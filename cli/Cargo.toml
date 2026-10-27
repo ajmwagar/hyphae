@@ -1,0 +1,18 @@
+[package]
+name = "hyphae-cli"
+description = "Standalone hyphae IMS client CLI (REGISTER ladder, UDP/TCP, no async runtime)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hyphae"
+path = "src/main.rs"
+
+[dependencies]
+sip.workspace = true
+aka.workspace = true
+ims.workspace = true
+carrier.workspace = true
+transport.workspace = true
