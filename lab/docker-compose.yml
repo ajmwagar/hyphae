@@ -1,0 +1,72 @@
+# IMS/VoLTE lab plan — Open5GS + Kamailio IMS + DNS + subscriber store.
+#
+# This file is a deployment PLAN, not a turnkey image. Pin the image tags to
+# versions you have validated and mount configs produced by the upstream
+# projects (see lab/README.md). It is intentionally not required for the unit
+# test gate, which uses transport::MockTransport and no network.
+#
+# Linux host assumed; `network_mode: host` makes SIP/RTP/GTP-U and the SBI
+# behave like a real EPC/5GC deployment. On macOS/Windows run the lab in a
+# Linux VM.
+services:
+  mongo:
+    image: mongo:6.0
+    container_name: ims-lab-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  dns:
+    image: coredns/coredns:1.11.1
+    container_name: ims-lab-dns
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./config/dns:/etc/coredns:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+
+  open5gs:
+    image: open5gs/open5gs:latest   # pin a validated tag before running
+    container_name: ims-lab-open5gs
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    network_mode: host
+    environment:
+      MCC: "${MCC:-001}"
+      MNC: "${MNC:-01}"
+      IMSI: "${IMSI:-001010000000001}"
+      IMS_APN: "${IMS_APN:-ims}"
+    volumes:
+      - ./config/open5gs:/etc/open5gs:ro
+      # Open5GS state (subscriber DB credentials are in config/open5gs/*.yaml)
+    command: ["open5gs-5gc"]
+
+  kamailio:
+    image: kamailio/kamailio-ci:5.8.3-alpine   # pin/validate
+    container_name: ims-lab-kamailio
+    restart: unless-stopped
+    depends_on:
+      - open5gs
+    network_mode: host
+    environment:
+      MCC: "${MCC:-001}"
+      MNC: "${MNC:-01}"
+      IMS_DOMAIN: "ims.mnc${MNC:-01}.mcc${MCC:-001}.3gppnetwork.org"
+      P_CSCF: "pcscf.ims.mnc${MNC:-01}.mcc${MCC:-001}.3gppnetwork.org"
+      S_CSCF: "scscf.ims.mnc${MNC:-01}.mcc${MCC:-001}.3gppnetwork.org"
+    volumes:
+      - ./config/kamailio:/etc/kamailio:ro
+      - kamailio-logs:/var/log/kamailio
+
+volumes:
+  mongo-data:
+  kamailio-logs:

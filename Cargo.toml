@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "sip",
+    "aka",
+    "ims",
+    "carrier",
+    "codec",
+    "codec-amr",
+    "transport",
+    "tests/conformance",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+sip = { path = "sip" }
+aka = { path = "aka" }
+ims = { path = "ims" }
+carrier = { path = "carrier" }
+codec = { path = "codec" }
+codec-amr = { path = "codec-amr" }
+transport = { path = "transport" }

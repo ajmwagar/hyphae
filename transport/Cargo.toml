@@ -1,0 +1,10 @@
+[package]
+name = "transport"
+description = "SIP transport trait and in-memory mock (no modem required)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sip.workspace = true

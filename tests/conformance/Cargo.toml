@@ -1,0 +1,16 @@
+[package]
+name = "conformance"
+description = "Spec-derived IMS conformance harness (mock transport, no network)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sip.workspace = true
+aka.workspace = true
+ims.workspace = true
+carrier.workspace = true
+codec.workspace = true
+codec-amr.workspace = true
+transport.workspace = true

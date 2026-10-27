@@ -1,0 +1,16 @@
+# MTSI audio offer with AMR-WB at 16 kHz and telephone-event.
+# RFC 4566 (SDP), RFC 4867 §8 (AMR-WB RTP payload), GSMA IR.92 §4.3,
+# 3GPP TS 26.114 §5.2.1 (mode-set/octet-align negotiation).
+v=0
+o=- 0 0 IN IP4 192.0.2.10
+s=-
+c=IN IP4 192.0.2.10
+t=0 0
+m=audio 49170 RTP/AVP 116 101
+a=rtpmap:116 AMR-WB/16000/1
+a=fmtp:116 octet-align=1;mode-set=0,1,2,3,4,5,6,7;mode-change-capability=2;max-red=0
+a=rtpmap:101 telephone-event/16000
+a=fmtp:101 0-15
+a=ptime:20
+a=maxptime:240
+a=sendrecv

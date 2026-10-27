@@ -1,0 +1,9 @@
+[package]
+name = "aka"
+description = "RFC 3310 IMS-AKA and 3GPP TS 35.206 Milenage, pure functions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]

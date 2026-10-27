@@ -1,0 +1,16 @@
+[package]
+name = "codec"
+description = "Codec trait + Opus implementation (feature-gated); PCM frames only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Enables the Opus backend. Opus is royalty-free (RFC 6716) and the only codec
+# shipped in this tree. AMR-WB/EVS are separate patent-noticed packages.
+opus = ["dep:opus"]
+
+[dependencies]
+opus = { version = "0.4", optional = true }

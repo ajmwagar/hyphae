@@ -1,0 +1,24 @@
+[package]
+name = "codec-amr"
+description = "AMR-WB codec boundary (feature-gated) and pure-Rust RFC 4867 RTP payload format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+links = "opencore-amrwb"
+
+[features]
+default = []
+# Link the SYSTEM libopencore-amrwb decoder (Apache-2.0 implementation).
+# No C source is vendored. Off by default: AMR-WB patents are NOT granted.
+amr-wb = []
+# Load libopencore-amrwb at runtime with dlopen (libloading). For targets whose
+# build host has no copy of the library. Mutually exclusive with `amr-wb`.
+amr-wb-dlopen = ["dep:libloading"]
+
+[dependencies]
+codec.workspace = true
+libloading = { version = "0.8", optional = true }
+
+[build-dependencies]
+pkg-config = "0.3"
