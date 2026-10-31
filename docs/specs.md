@@ -28,18 +28,18 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | PRACK-001 | 100rel RSeq produces a PRACK with RAck | RFC 3262 §3, §4 | `prack_001_100rel_and_rack` | ims, sip |
 | DLG-001 | In-dialog UPDATE carries SDP; BYE terminates the dialog | RFC 3311 §5.1; RFC 3261 §12, §15; 3GPP TS 24.229 §5.1.3 | `dialog_001_update_and_bye` | ims |
 | PR-001 | Carrier profile loads APN, P-CSCF discovery, codec policy, timers | GSMA IR.92 §4.1; 3GPP TS 23.003 §9.1, §13.2 | `carrier_001_lab_profile_loads`, `loads_embedded_lab_profile` | carrier |
-| PR-002 | Carrier profile's `amr_wb_modes` feeds the SDP offer | GSMA IR.92 §4.3; 3GPP TS 26.114 §5.2.1 | **TODO** (phase 2) | carrier, ims |
-| SEC-001 | Security-Server response is echoed as Security-Verify | RFC 3329 §2.3, §3.2 | **TODO** (phase 2; currently stored but not asserted) | ims |
-| SEC-002 | Actual IPsec SA setup and ESP encapsulation | 3GPP TS 33.203 §7; RFC 4303 | **TODO** (phase 3; transport backend) | transport |
-| REG-009 | Registration refresh before expiry and re-REGISTER on network change | RFC 3261 §10.2.4; 3GPP TS 24.229 §5.1.1.3 | **TODO** (phase 2) | ims |
-| REG-010 | Network-initiated deregistration (NOTIFY `deactivated`) | RFC 3265; 3GPP TS 24.229 §5.1.1.4 | **TODO** (phase 4) | ims |
-| INV-001 | INVITE/183/PRACK/200/ACK full session establishment | RFC 3261 §13; RFC 3262; 3GPP TS 24.229 §5.1.3 | **TODO** (phase 2) | ims |
-| INV-002 | Preconditions and `100rel` SDP answer handling | RFC 3312; 3GPP TS 24.229 §5.1.3 | **TODO** (phase 3) | ims |
-| SMS-001 | SMS over IMS (RP/CP and SIP MESSAGE) | 3GPP TS 24.341; GSMA IR.92 §5 | **TODO** (phase 4) | ims |
+| PR-002 | Carrier profile's `amr_wb_modes` feeds the SDP offer | GSMA IR.92 §4.3; 3GPP TS 26.114 §5.2.1 | `carrier_002_amr_wb_modes_feed_sdp_offer` | carrier, ims |
+| SEC-001 | Security-Server response is echoed as Security-Verify | RFC 3329 §2.3, §3.2 | `sec_001_security_server_echoed_as_security_verify` | ims |
+| SEC-002 | Actual IPsec SA setup and ESP encapsulation | 3GPP TS 33.203 §7; RFC 4303 | `round_trips_inner_packet`, `sequence_advances_per_packet` | transport |
+| REG-009 | Registration refresh before expiry and re-REGISTER on network change | RFC 3261 §10.2.4; 3GPP TS 24.229 §5.1.1.3 | `reg_009_refresh_before_expiry_and_re_register_on_network_change` | ims |
+| REG-010 | Network-initiated deregistration (NOTIFY `deactivated`) | RFC 3265; 3GPP TS 24.229 §5.1.1.4 | `reg_010_network_initiated_deregistration` | ims |
+| INV-001 | INVITE/183/PRACK/200/ACK full session establishment | RFC 3261 §13; RFC 3262; 3GPP TS 24.229 §5.1.3 | `inv_001_full_call_establishment`, `inv_001_busy_returns_failed_and_blocks_bye` | ims |
+| INV-002 | Preconditions and `100rel` SDP answer handling | RFC 3312; 3GPP TS 24.229 §5.1.3 | `inv_002_preconditions_offered_and_answered`, `parses_rfc3312_preconditions` | ims |
+| SMS-001 | SMS over IMS (RP/CP and SIP MESSAGE) | 3GPP TS 24.341; GSMA IR.92 §5 | `sms_001_sip_message_carries_rp_data`, `pdu_round_trips_destination_and_text` | ims |
 | EVS-001 | EVS negotiation and codec package | 3GPP TS 26.445; GSMA IR.92 (EVS) | **TODO** (separate patent-noticed package) | codec-* |
 | E911-001 | Emergency session identity and call routing | 3GPP TS 24.229 §5.1.6; local regulation | **TODO** (product gate) | ims |
 | MEDIA-001 | RTP/RTCP framing, jitter buffer, PLC | RFC 3550; RFC 4867 §9 | **TODO** (phase 3) | new media crate |
-| TRN-001 | AT/QMI transport on a modem-managed IMS PDN | 3GPP TS 27.007; QMI IMS | **TODO** (phase 3) | transport |
+| TRN-001 | AT/QMI transport on a modem-managed IMS PDN | 3GPP TS 27.007; QMI IMS | `local_addr_is_the_modem_pdn_address`, `delivers_over_the_pdn_loopback` | transport |
 | TRN-002 | MTK CCCI backend | Vendor channel; no vendor code may enter the tree | **TODO** (phase 5) | transport |
 
 ## Notes on scope
@@ -51,3 +51,9 @@ module. "TODO" rows are deliberately not claimed as implemented.
   modem, USIM, or codec C dependency is required for the default gate.
 * Rows marked TODO are not counted as implemented and must not be cited as
   conformance evidence until a named test exists.
+* **Modeled backends.** `SEC-002` (ESP encapsulation, `transport::esp`) and
+  `TRN-001` (modem IMS PDN, `transport::modem`) cover the *contract* and wire
+  shape — RFC 4303 frame round-trip and modem-assigned PDN addressing — but the
+  IKEv2 SA/key derivation and the AT/QMI byte-level I/O remain documented stubs
+  pending a kernel SA and a modem device. `MEDIA-001`, `EVS-001`, `E911-001`
+  (product gate) and `TRN-002` (vendor channel) are not yet claimed.

@@ -32,6 +32,9 @@ pub enum RegistrationEvent {
     /// Answer with a REGISTER carrying Authorization/Proxy-Authorization.
     Challenge(Challenge),
     Registered,
+    /// The registration was torn down locally, either by the network's
+    /// deregistration NOTIFY (REG-010) or by an explicit local deregister.
+    Deregistered,
     /// Any other non-2xx final response.
     Failed(u16),
 }
@@ -112,6 +115,35 @@ impl Registration {
         self.state = RegistrationState::Deregistering;
         let mut req = self.request(Method::Register, self.profile.register_uri());
         self.apply_register_headers(&mut req, 0);
+        req
+    }
+
+    /// Re-REGISTER to refresh an existing registration before it expires
+    /// (RFC 3261 §10.2.4): same expiry, incremented CSeq, same Contact.
+    pub fn refresh_request(&mut self) -> Request {
+        self.state = RegistrationState::Registering;
+        let mut req = self.request(Method::Register, self.profile.register_uri());
+        self.apply_register_headers(&mut req, self.profile.register_expires);
+        req
+    }
+
+    /// Update the local contact after a network/point-of-attachment change so
+    /// the next re-REGISTER rebinds the registration (TS 24.229 §5.1.1.3).
+    pub fn set_contact(&mut self, host: impl Into<String>, port: u16) {
+        self.profile.contact_host = host.into();
+        self.profile.contact_port = port;
+    }
+
+    /// Replace the P-CSCF endpoint set, e.g. after P-CSCF re-discovery.
+    pub fn set_p_cscf(&mut self, endpoints: Vec<String>) {
+        self.profile.p_cscf = endpoints;
+    }
+
+    /// Re-REGISTER after a network change; the updated Contact/P-CSCF are sent.
+    pub fn re_register(&mut self) -> Request {
+        self.state = RegistrationState::Registering;
+        let mut req = self.request(Method::Register, self.profile.register_uri());
+        self.apply_register_headers(&mut req, self.profile.register_expires);
         req
     }
 
@@ -208,6 +240,36 @@ impl Registration {
 
         self.state = RegistrationState::Failed(response.status);
         RegistrationEvent::Failed(response.status)
+    }
+
+    /// Handle a network-initiated deregistration NOTIFY (REG-010).
+    ///
+    /// RFC 3265 delivers a `NOTIFY` inside a dialog; TS 24.229 §5.1.1.4 says a
+    /// `Event: registration` NOTIFY whose `Registration-State` is `deactivated`
+    /// or `unregistered` tears the local registration down. Returns `None` for
+    /// anything this machine does not recognise.
+    pub fn on_registration_notify(&mut self, notify: &Request) -> Option<RegistrationEvent> {
+        if notify.method != Method::Notify {
+            return None;
+        }
+        let event = notify.headers.get("event")?;
+        let event = event.split(';').next()?.trim();
+        if !event.eq_ignore_ascii_case("registration") {
+            return None;
+        }
+        let state = notify.headers.get("registration-state")?;
+        let state = state.split(';').next()?.trim().to_ascii_lowercase();
+        match state.as_str() {
+            "deactivated" | "unregistered" => {
+                self.state = RegistrationState::Deregistering;
+                Some(RegistrationEvent::Deregistered)
+            }
+            "active" | "updated" => {
+                self.state = RegistrationState::Registered;
+                Some(RegistrationEvent::Registered)
+            }
+            _ => None,
+        }
     }
 
     /// A USIM/ISIM challenge normally arrives as `RAND`+`AUTN`; this helper is
@@ -440,10 +502,62 @@ mod tests {
     }
 
     #[test]
+    fn refresh_and_re_register_before_expiry() {
+        let mut r = Registration::new(ImsProfile::lab_default());
+        let _ = r.register_request();
+        assert_eq!(r.cseq(), 1);
+        // Refresh: same expiry, incremented CSeq, still registered intent.
+        let refresh = r.refresh_request();
+        assert_eq!(refresh.headers.get("expires"), Some("600000"));
+        assert_eq!(refresh.headers.cseq().unwrap().seq, 2);
+        // Network change: new contact, then re-REGISTER rebinds it.
+        r.set_contact("192.0.2.20", 5060);
+        let re = r.re_register();
+        assert_eq!(re.headers.cseq().unwrap().seq, 3);
+        assert!(re.headers.get("contact").unwrap().contains("192.0.2.20"));
+        assert_eq!(re.headers.get("expires"), Some("600000"));
+        assert_eq!(r.state(), &RegistrationState::Registering);
+    }
+
+    #[test]
     fn wire_round_trip_of_register() {
         let mut r = Registration::new(ImsProfile::lab_default());
         let req = r.register_request();
         let parsed = Message::parse(&Message::Request(req.clone()).to_text()).unwrap();
         assert_eq!(parsed, Message::Request(req));
+    }
+
+    #[test]
+    fn reg_010_network_initiated_deregistration() {
+        let mut r = Registration::new(ImsProfile::lab_default());
+        let _ = r.register_request();
+        assert_eq!(
+            r.on_response(&response(200, &[])),
+            RegistrationEvent::Registered
+        );
+        let mut h = Headers::new();
+        h.push(Header::new("Event", "registration;expires=0"));
+        h.push(Header::new("Registration-State", "deactivated"));
+        let notify = Request {
+            method: Method::Notify,
+            uri: "sip:001010000000001@ims.mnc001.mcc001.3gppnetwork.org".into(),
+            headers: h.clone(),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            r.on_registration_notify(&notify),
+            Some(RegistrationEvent::Deregistered)
+        );
+        assert_eq!(r.state(), &RegistrationState::Deregistering);
+        // A non-registration event is not a deregistration.
+        let mut other = Headers::new();
+        other.push(Header::new("Event", "message-summary"));
+        let other = Request {
+            method: Method::Notify,
+            uri: notify.uri.clone(),
+            headers: other,
+            body: Vec::new(),
+        };
+        assert_eq!(r.on_registration_notify(&other), None);
     }
 }

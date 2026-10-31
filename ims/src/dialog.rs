@@ -71,6 +71,31 @@ impl Dialog {
         self.state = DialogState::Confirmed;
     }
 
+    /// INVITE carrying an SDP offer: RFC 3261 §13, RFC 3264. Uses the INVITE
+    /// CSeq and no To-tag (learned from the response); `Supported: 100rel`
+    /// advertises reliable-provision handling for MTSI.
+    pub fn invite(&mut self, offer: &crate::Sdp) -> Request {
+        let uri = self
+            .route_set
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.remote_uri.clone());
+        let mut req = self.request(Method::Invite, uri, self.invite_cseq);
+        req.headers
+            .push(Header::new("Content-Type", "application/sdp"));
+        req.headers.push(Header::new("Supported", "100rel"));
+        req.body = offer.to_text().as_bytes().to_vec();
+        req.headers
+            .set("Content-Length", req.body.len().to_string());
+        req
+    }
+
+    /// Adopt the callee's tag from a response's `To` header (RFC 3261 §12.1).
+    /// The caller's dialog has no remote tag until the first tagged response.
+    pub fn set_remote_tag(&mut self, to_header: &str) {
+        self.remote_tag = extract_tag(to_header).unwrap_or_default();
+    }
+
     /// ACK for a 2xx INVITE: RFC 3261 §13.2.2.4, same CSeq number.
     pub fn ack(&mut self) -> Request {
         let uri = self
@@ -109,6 +134,8 @@ impl Dialog {
         req.headers
             .push(Header::new("Content-Type", "application/sdp"));
         req.body = sdp.as_bytes().to_vec();
+        req.headers
+            .set("Content-Length", req.body.len().to_string());
         req
     }
 
@@ -143,10 +170,13 @@ impl Dialog {
             "From",
             format!("<{}>;tag={}", self.local_uri, self.local_tag),
         ));
-        headers.push(Header::new(
-            "To",
-            format!("<{}>;tag={}", self.remote_uri, self.remote_tag),
-        ));
+        // The initial INVITE has no To-tag; it is learned from the first response.
+        let to = if self.remote_tag.is_empty() {
+            format!("<{}>", self.remote_uri)
+        } else {
+            format!("<{}>;tag={}", self.remote_uri, self.remote_tag)
+        };
+        headers.push(Header::new("To", to));
         headers.push(Header::new("Call-ID", self.call_id.clone()));
         headers.push(Header::new("CSeq", format!("{cseq} {method}")));
         for route in &self.route_set {
@@ -164,6 +194,18 @@ impl Dialog {
             body: Vec::new(),
         }
     }
+}
+
+/// Extract the `tag` parameter from a `From`/`To` header value.
+fn extract_tag(header: &str) -> Option<String> {
+    for part in sip::split_params(header) {
+        if let Some((key, value)) = part.split_once('=') {
+            if key.trim().eq_ignore_ascii_case("tag") {
+                return Some(value.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

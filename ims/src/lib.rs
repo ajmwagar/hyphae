@@ -13,12 +13,16 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod call;
 pub mod dialog;
 pub mod profile;
 pub mod register;
 pub mod sdp;
+pub mod sms;
 
+pub use call::{Call, CallEvent, CallState};
 pub use dialog::{Dialog, DialogState};
 pub use profile::{ImsProfile, SecurityClient};
 pub use register::{Challenge, Registration, RegistrationEvent, RegistrationState};
-pub use sdp::{Connection, Media, Origin, Sdp};
+pub use sdp::{Connection, Media, Origin, PrecondDir, Precondition, Sdp};
+pub use sms::{SmsSender, SmsSubmit};
