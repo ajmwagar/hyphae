@@ -5,10 +5,13 @@ stack has never been open source; when 2G/3G was switched off, Linux phones lost
 voice. This is the missing control plane: SIP, IMS-AKA, registration, dialogs,
 SDP, carrier profiles and a codec-agnostic media boundary.
 
-Status: **scaffold**. The control-plane state machine, Milenage/AKA, SDP,
-RFC 4867 payload format, carrier loader and mock transport compile and have
-spec-derived tests. RTP/RTCP, IPsec, the modem transport adapters and a
-standalone CLI are TODO phases (see [`docs/specs.md`](docs/specs.md)).
+Status: **spec matrix green**. The control-plane state machine, Milenage/AKA,
+SDP offer/answer with RFC 3312 preconditions, RFC 4867 payload format, SMS over
+IMS, the caller-side call path, carrier loader and both mock and modem-modeled
+transports compile and have spec-derived tests. The standalone CLI works in
+mock/lab mode. RTP/RTCP media framing, real IPsec SA/crypto, the byte-level
+AT/QMI I/O and the vendor CCCI channel are the remaining stubbed or
+product-gated rows (see [`docs/specs.md`](docs/specs.md)).
 
 ## Why it matters
 
@@ -59,10 +62,13 @@ The protocol crates never start a thread, open a socket, or link a codec.
 cargo check --workspace
 cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p transport -p conformance
 cargo run -p ims --example register_flow
+cargo run -p ims --example call_flow
 ```
 
 `register_flow` prints the exact initial REGISTER, a simulated 401 and the
-authorized REGISTER with an AKAv1-MD5 digest. It does not touch the network.
+authorized REGISTER with an AKAv1-MD5 digest. `call_flow` drives the caller
+state machine through a full INVITE/183/PRACK/200/ACK/BYE ladder. Both use the
+in-memory mock transport; neither touches the network.
 
 ### ARM cross-check (a gate, same weight as host check)
 
