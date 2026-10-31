@@ -4,6 +4,11 @@ Status: **plan plus a compose file**. The compose file has not been run in this
 repository. The client-side protocol tests do not need the lab. This document is
 the exact path to a real REGISTER once the images/configs are pinned.
 
+> **Runnable now (any host with a UDP socket).** `lab/pris/` runs the same
+> REGISTER ladder against a small local P-CSCF stand-in — real UDP transport,
+> real AKAv1-MD5 challenge, digest verified — without Docker or a USIM. Start
+> it with `cd lab/pris && ./run.sh`. See `lab/pris/README.md`.
+
 ## Target lab topology
 
 ```text
