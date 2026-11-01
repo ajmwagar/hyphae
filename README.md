@@ -6,8 +6,8 @@ voice. This is the missing control plane: SIP, IMS-AKA, registration, dialogs,
 SDP, carrier profiles and a codec-agnostic media boundary.
 
 Status: **spec matrix green**. The control-plane state machine, Milenage/AKA,
-SDP offer/answer with RFC 3312 preconditions, RFC 4867 payload format, SMS over
-IMS, the caller-side call path, carrier loader, RTP/RTCP media framing (RFC 3550
+SDP offer/answer with RFC 3312 preconditions, RFC 4867 and TS 26.445 (EVS)
+payload formats, SMS over IMS, the caller-side call path, carrier loader, RTP/RTCP media framing (RFC 3550
 plus a jitter buffer and PLC) and both mock and modem-modeled transports compile
 and have spec-derived tests. The standalone CLI works in mock/lab mode. Real
 IPsec SA/crypto, the byte-level AT/QMI I/O and the vendor CCCI channel are the
@@ -48,6 +48,7 @@ ims/        profile, REGISTER/401/407, SDP offer/answer, PRACK/UPDATE/BYE
 carrier/    TOML profiles keyed by MCC/MNC + lab profile 00101
 codec/      Codec trait + optional Opus (feature `opus`); PCM only
 codec-amr/  RFC 4867 payload format + optional AMR-WB FFI (separate package)
+evs/        TS 26.445 appendix A EVS RTP payload format (Header-Full); no codec
 media/      RTP/RTCP framing (RFC 3550), jitter buffer and PLC around codec-amr
 transport/  Transport trait + in-memory MockTransport
 tests/      conformance harness + golden fixtures with spec citations
@@ -61,7 +62,7 @@ The protocol crates never start a thread, open a socket, or link a codec.
 
 ```sh
 cargo check --workspace
-cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p media -p transport -p conformance
+cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p evs -p media -p transport -p conformance
 cargo run -p ims --example register_flow
 cargo run -p ims --example call_flow
 ```
@@ -91,6 +92,9 @@ cargo test -p codec --features opus
 
 # RFC 4867 payload format is always available; no C, no feature
 cargo test -p codec-amr
+
+# EVS (TS 26.445 appendix A) payload format is always available; no C, no feature
+cargo test -p evs
 
 # AMR-WB against the SYSTEM libopencore-amrwb (patents NOT granted)
 cargo test -p codec-amr --features amr-wb

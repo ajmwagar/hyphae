@@ -1,0 +1,12 @@
+[package]
+name = "evs"
+description = "3GPP TS 26.445 appendix A Header-Full EVS RTP payload format (pure-Rust, patent-noticed)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+
+[dependencies]

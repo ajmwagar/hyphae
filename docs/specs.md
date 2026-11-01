@@ -36,7 +36,7 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | INV-001 | INVITE/183/PRACK/200/ACK full session establishment | RFC 3261 §13; RFC 3262; 3GPP TS 24.229 §5.1.3 | `inv_001_full_call_establishment`, `inv_001_busy_returns_failed_and_blocks_bye` | ims |
 | INV-002 | Preconditions and `100rel` SDP answer handling | RFC 3312; 3GPP TS 24.229 §5.1.3 | `inv_002_preconditions_offered_and_answered`, `parses_rfc3312_preconditions` | ims |
 | SMS-001 | SMS over IMS (RP/CP and SIP MESSAGE) | 3GPP TS 24.341; GSMA IR.92 §5 | `sms_001_sip_message_carries_rp_data`, `pdu_round_trips_destination_and_text` | ims |
-| EVS-001 | EVS negotiation and codec package | 3GPP TS 26.445; GSMA IR.92 (EVS) | **TODO** (separate patent-noticed package) | codec-* |
+| EVS-001 | EVS RTP payload format (TS 26.445 app. A, Header-Full): CMR/ToC bytes, Primary + AMR-WB IO frame tables, speech/SID/lost/no-data classification, multi-frame round-trip, frame-size validation; Compact/storage/multi-channel rejected | 3GPP TS 26.445 §appendix A (A.1–A.3); clock 48 kHz, 20 ms frames | `evs_001_cmr_toc_byte_round_trips`, `evs_001_frame_table_classification`, `evs_001_primary_speech_frame_sizes`, `evs_001_multi_frame_round_trips`, `evs_001_compact_format_is_rejected` | evs, conformance |
 | E911-001 | Emergency session identity and call routing | 3GPP TS 24.229 §5.1.6; local regulation | **TODO** (product gate) | ims |
 | MEDIA-001 | RTP/RTCP framing, jitter buffer, PLC | RFC 3550; RFC 4867 §9 | `media_001_rtp_amr_frame_round_trips_the_wire`, `media_001_rtcp_sender_report_survives_the_wire`, `media_001_jitter_buffer_reorders_and_flags_loss`, `media_001_plc_conceals_a_lost_frame` | media |
 | TRN-001 | AT/QMI transport on a modem-managed IMS PDN | 3GPP TS 27.007; QMI IMS | `local_addr_is_the_modem_pdn_address`, `delivers_over_the_pdn_loopback` | transport |
@@ -44,9 +44,11 @@ module. "TODO" rows are deliberately not claimed as implemented.
 
 ## Notes on scope
 
-* "AMR-WB" appears above only as SDP/RTP **negotiation and packet layout**.
-  There is no AMR-WB speech implementation in `codec` (Opus-only) or in any
-  core crate. `codec-amr` is a separate, feature-off, patent-noticed package.
+* "AMR-WB" and "EVS" appear above only as SDP/RTP **negotiation and packet
+  layout**. There is no AMR-WB or EVS speech implementation in `codec`
+  (Opus-only) or in any core crate. `codec-amr` (RFC 4867) and `evs`
+  (TS 26.445 appendix A) are separate, feature-off, patent-noticed packages
+  that ship the payload format but no codec.
 * Tests are all host-side and use `transport::MockTransport`; no network,
   modem, USIM, or codec C dependency is required for the default gate.
 * Rows marked TODO are not counted as implemented and must not be cited as
@@ -55,10 +57,13 @@ module. "TODO" rows are deliberately not claimed as implemented.
   `TRN-001` (modem IMS PDN, `transport::modem`) cover the *contract* and wire
   shape — RFC 4303 frame round-trip and modem-assigned PDN addressing — but the
   IKEv2 SA/key derivation and the AT/QMI byte-level I/O remain documented stubs
-  pending a kernel SA and a modem device. `EVS-001`, `E911-001` (product gate)
-  and `TRN-002` (vendor channel) are not yet claimed.
+  pending a kernel SA and a modem device. `E911-001` (product gate) and
+  `TRN-002` (vendor channel) are not yet claimed. `EVS-001` is implemented as
+  the TS 26.445 appendix A *Header-Full* RTP payload format only (no speech
+  codec); see the media-path note below.
 * **Media path.** The `media` crate frames RTP/RTCP and buffers playout. It
   wraps the [`codec-amr`] payload (RFC 4867 §9) but never decodes speech, so it
   stays royalty-free; the AMR-WB/EVS codec itself is still the separate
-  feature-gated package. Real network I/O is [`transport`]; `media` is
-  socket-free and tested over in-memory packets.
+  feature-gated package. The [`evs`] payload format is likewise packet layout
+  only. Real network I/O is [`transport`]; `media` is socket-free and tested
+  over in-memory packets.
