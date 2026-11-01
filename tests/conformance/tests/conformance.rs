@@ -2,7 +2,10 @@
 //! plain values only: no network, no modem, no codec C dependency.
 
 use conformance::{sdp, sip};
-use ims::{Dialog, ImsProfile, Registration, RegistrationEvent, RegistrationState, Sdp};
+use ims::{
+    Call, CallEvent, CallState, Dialog, ImsProfile, Registration, RegistrationEvent,
+    RegistrationState, Sdp, SmsSender, SmsSubmit,
+};
 use sip::{Headers, Message, Method, Response};
 use std::time::Duration;
 use transport::{MockTransport, Transport};
@@ -364,4 +367,250 @@ fn tx_001_client_transaction_401_then_200() {
     let mut tx = ClientTransaction::new(key, true);
     assert_eq!(tx.on_response(401), ClientEvent::Final(401));
     assert_eq!(tx.state, sip::ClientTransactionState::Completed);
+}
+// --- Call establishment (INV-001) -----------------------------------------
+
+fn mk_response(status: u16, cseq: &str, extra: &[(&str, &str)], body: &[u8]) -> Response {
+    let mut h = Headers::new();
+    h.push(sip::Header::new("CSeq", cseq.to_string()));
+    for &(k, v) in extra {
+        h.push(sip::Header::new(k, v));
+    }
+    Response {
+        status,
+        reason: "test".into(),
+        headers: h,
+        body: body.to_vec(),
+    }
+}
+
+#[test]
+fn inv_001_full_call_establishment() {
+    let (mut client, mut server) = MockTransport::pair();
+    let mut call = Call::new(
+        ImsProfile::lab_default(),
+        "sip:001010000000002@ims.mnc001.mcc001.3gppnetwork.org",
+    );
+    let timeout = Duration::from_millis(200);
+
+    // 1. INVITE with an AMR-WB offer goes onto the wire.
+    let CallEvent::Send(invite) = call.invite() else {
+        panic!("invite expected")
+    };
+    let invite_cseq = invite.headers.cseq().unwrap().seq;
+    client.send(&Message::Request(invite)).unwrap();
+    let Message::Request(got_invite) = server.recv(timeout).unwrap().unwrap() else {
+        panic!("invite not delivered")
+    };
+    assert_eq!(got_invite.method, Method::Invite);
+    let offer = Sdp::parse(core::str::from_utf8(&got_invite.body).unwrap()).unwrap();
+    assert_eq!(
+        offer.audio().unwrap().payload_type("AMR-WB", 16_000),
+        Some(116)
+    );
+
+    // Server ladder: 100 Trying, reliable 183 (answer + RSeq), 200 to PRACK,
+    // 200 to INVITE. Only the CSeq method distinguishes the two 2xx responses.
+    let cseq_invite = format!("{invite_cseq} INVITE");
+    let cseq_prack = format!("{} PRACK", invite_cseq + 1);
+    let answer = Sdp::answer_amr_wb(&offer, "192.0.2.11").unwrap();
+    let answer_bytes = answer.to_text().into_bytes();
+    server
+        .send(&Message::Response(mk_response(
+            183,
+            &cseq_invite,
+            &[
+                ("Require", "100rel"),
+                ("RSeq", "1"),
+                (
+                    "To",
+                    "<sip:001010000000002@ims.mnc001.mcc001.3gppnetwork.org>;tag=callee-tag",
+                ),
+                ("Content-Type", "application/sdp"),
+            ],
+            &answer_bytes,
+        )))
+        .unwrap();
+    server
+        .send(&Message::Response(mk_response(200, &cseq_prack, &[], &[])))
+        .unwrap();
+    server
+        .send(&Message::Response(mk_response(200, &cseq_invite, &[], &[])))
+        .unwrap();
+
+    // 100 Trying: no action.
+    assert_eq!(
+        call.on_response(&mk_response(100, &cseq_invite, &[], &[])),
+        CallEvent::Provisional
+    );
+    assert_eq!(call.state(), CallState::Inviting);
+
+    // Reliable 183: PRACK is owed, and the answer is captured.
+    let prack = match call.on_response(&mk_response(
+        183,
+        &cseq_invite,
+        &[
+            ("Require", "100rel"),
+            ("RSeq", "1"),
+            (
+                "To",
+                "<sip:001010000000002@ims.mnc001.mcc001.3gppnetwork.org>;tag=callee-tag",
+            ),
+            ("Content-Type", "application/sdp"),
+        ],
+        &answer_bytes,
+    )) {
+        CallEvent::Send(req) => req,
+        other => panic!("expected PRACK, got {other:?}"),
+    };
+    assert_eq!(prack.method, Method::Prack);
+    assert_eq!(prack.headers.get("rack"), Some("1 1 INVITE"));
+    assert!(call.answer().is_some());
+    client.send(&Message::Request(prack)).unwrap();
+    let Message::Request(got_prack) = server.recv(timeout).unwrap().unwrap() else {
+        panic!("prack not delivered")
+    };
+    assert_eq!(got_prack.method, Method::Prack);
+    assert_eq!(got_prack.headers.get("rack"), Some("1 1 INVITE"));
+
+    // 200 to PRACK advances the machine but does not establish the call.
+    assert_eq!(
+        call.on_response(&mk_response(200, &cseq_prack, &[], &[])),
+        CallEvent::Provisional
+    );
+    assert_eq!(call.state(), CallState::AwaitingInviteFinal);
+
+    // 200 to INVITE: the call is established and an ACK is owed.
+    let CallEvent::Established { ack } =
+        call.on_response(&mk_response(200, &cseq_invite, &[], &[]))
+    else {
+        panic!("expected the call to be established");
+    };
+    assert_eq!(ack.method, Method::Ack);
+    assert_eq!(ack.headers.cseq().unwrap().seq, invite_cseq);
+    // The negotiated answer is available after establishment.
+    assert_eq!(
+        call.answer()
+            .unwrap()
+            .audio()
+            .unwrap()
+            .payload_type("AMR-WB", 16_000),
+        Some(116)
+    );
+    client.send(&Message::Request(ack)).unwrap();
+    assert_eq!(call.state(), CallState::Established);
+    let Message::Request(got_ack) = server.recv(timeout).unwrap().unwrap() else {
+        panic!("ack not delivered")
+    };
+    assert_eq!(got_ack.method, Method::Ack);
+    assert_eq!(got_ack.headers.cseq().unwrap().seq, invite_cseq);
+
+    // The dialog can now be released with a BYE.
+    let bye = call.bye().expect("bye on an established call");
+    assert_eq!(bye.method, Method::Bye);
+    assert_eq!(call.state(), CallState::Terminated);
+}
+
+#[test]
+fn inv_001_busy_returns_failed_and_blocks_bye() {
+    let mut call = Call::new(
+        ImsProfile::lab_default(),
+        "sip:001010000000002@ims.mnc001.mcc001.3gppnetwork.org",
+    );
+    let _ = call.invite();
+    let busy = mk_response(
+        486,
+        "1 INVITE",
+        &[(
+            "To",
+            "<sip:001010000000002@ims.mnc001.mcc001.3gppnetwork.org>;tag=callee-tag",
+        )],
+        &[],
+    );
+    assert_eq!(call.on_response(&busy), CallEvent::Failed(486));
+    assert_eq!(call.state(), CallState::Failed(486));
+    assert!(call.bye().is_none());
+}
+
+// --- Registration refresh (REG-009) ---------------------------------------
+
+#[test]
+fn reg_009_refresh_before_expiry_and_re_register_on_network_change() {
+    let mut reg = Registration::new(ImsProfile::lab_default());
+    let _ = reg.register_request();
+    let first = reg.cseq();
+    // Refresh before expiry: same expiry, incremented CSeq.
+    let refresh = reg.refresh_request();
+    assert_eq!(refresh.headers.get("expires"), Some("600000"));
+    assert_eq!(refresh.headers.cseq().unwrap().seq, first + 1);
+    // Network change: the contact moves; re-REGISTER rebinds it.
+    reg.set_contact("192.0.2.20", 5060);
+    let re = reg.re_register();
+    assert_eq!(re.headers.cseq().unwrap().seq, first + 2);
+    assert!(re.headers.get("contact").unwrap().contains("192.0.2.20"));
+    assert_eq!(re.headers.get("expires"), Some("600000"));
+}
+
+// --- SMS over IMS (SMS-001) -------------------------------------------------
+
+#[test]
+fn sms_001_sip_message_carries_rp_data() {
+    let profile = ImsProfile::lab_default();
+    let mut tx = SmsSender::new(&profile.public_identity, &profile.contact_host, 5060);
+    let submit = SmsSubmit {
+        service_center: "15551000000".into(),
+        destination: "15552000000".into(),
+        pid: 0,
+        dcs: 0,
+        text: "Hello over IMS".into(),
+    };
+    let request = tx.message(
+        &profile,
+        "sip:ip-sm-gw@ims.mnc001.mcc001.3gppnetwork.org",
+        &submit,
+    );
+    assert_eq!(request.method, Method::Message);
+    assert_eq!(
+        request.headers.get("content-type"),
+        Some("application/vnd.3gpp.sms")
+    );
+    // The GSM 03.40 PDU is the tail of the RP-DATA body and round-trips.
+    let pdu = submit.encode();
+    assert!(request.body.ends_with(&pdu));
+    assert_eq!(ims::SmsSubmit::encode(&submit).len(), pdu.len());
+
+    // The wire serialisation is binary-safe: Content-Type is a header and the
+    // RP-DATA body (with its binary GSM PDU) is the trailing octets. The sip
+    // parser is &str-based for text bodies (SDP), so we assert the raw bytes
+    // rather than re-parsing the binary MESSAGE body.
+    let wire = Message::Request(request).to_bytes();
+    let sep = wire
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("header/body separator");
+    let head = std::str::from_utf8(&wire[..sep]).unwrap();
+    assert!(head.contains("Content-Type: application/vnd.3gpp.sms"));
+    assert!(wire.ends_with(&pdu));
+}
+
+// --- Preconditions (INV-002) ------------------------------------------------
+
+#[test]
+fn inv_002_preconditions_offered_and_answered() {
+    // The callee offers with preconditions; the caller answers and confirms.
+    let mut offer = Sdp::amr_wb_offer(&[0, 1, 2, 3, 4, 5, 6, 7], true, "192.0.2.10");
+    offer.add_preconditions();
+    let m = offer.audio().unwrap();
+    let precond = m.precondition().expect("offer has preconditions");
+    assert_eq!(precond.createmedia, Some(ims::PrecondDir::SendRecv));
+    assert!(precond.met());
+
+    let answer = Sdp::answer_amr_wb(&offer, "192.0.2.11").unwrap();
+    let a = answer.audio().unwrap();
+    let answered = a.precondition().expect("answer echoes preconditions");
+    assert_eq!(answered.createmedia, Some(ims::PrecondDir::SendRecv));
+    assert_eq!(answered.confirmed, Some(ims::PrecondDir::SendRecv));
+    // The wire form carries the RFC 3312 attributes.
+    assert!(answer.to_text().contains("a=createmedia:sendrecv"));
+    assert!(answer.to_text().contains("a=confirmed:sendrecv"));
 }

@@ -19,6 +19,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod esp;
+pub mod modem;
 pub mod net;
 
 use sip::Message;

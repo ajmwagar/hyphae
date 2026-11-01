@@ -48,6 +48,78 @@ impl Attribute {
     }
 }
 
+/// RFC 3312 precondition direction value (`send`, `recv`, `sendrecv`, `none`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrecondDir {
+    Send,
+    Recv,
+    SendRecv,
+    None,
+}
+
+impl PrecondDir {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "send" => Some(Self::Send),
+            "recv" => Some(Self::Recv),
+            "sendrecv" => Some(Self::SendRecv),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::Recv => "recv",
+            Self::SendRecv => "sendrecv",
+            Self::None => "none",
+        }
+    }
+}
+
+/// RFC 3312 media preconditions for a single `m=` line, as used by IMS session
+/// preconditions (TS 24.229 §5.1.3). `status` reflects the local readiness;
+/// `confirmed` is set once the remote side has acknowledged its media is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Precondition {
+    /// `a=createmedia`: media direction to establish before the answer is sent.
+    pub createmedia: Option<PrecondDir>,
+    /// `a=status`: local precondition status.
+    pub status: Option<PrecondDir>,
+    /// `a=confirmed`: the remote has confirmed its media resources.
+    pub confirmed: Option<PrecondDir>,
+}
+
+impl Precondition {
+    /// Whether local media resources are ready: `status` is `sendrecv`.
+    pub fn met(&self) -> bool {
+        matches!(self.status, Some(PrecondDir::SendRecv))
+    }
+    fn from_media(m: &Media) -> Self {
+        Self {
+            createmedia: m.attribute("createmedia").and_then(PrecondDir::parse),
+            status: m.attribute("status").and_then(PrecondDir::parse),
+            confirmed: m.attribute("confirmed").and_then(PrecondDir::parse),
+        }
+    }
+    /// Append the populated attributes to a media line, skipping any the media
+    /// already carries.
+    fn push_to(&self, m: &mut Media) {
+        for (attr, dir) in [
+            ("createmedia", self.createmedia),
+            ("status", self.status),
+            ("confirmed", self.confirmed),
+        ] {
+            if let Some(d) = dir {
+                if m.attribute(attr).is_some() {
+                    continue;
+                }
+                m.attributes.push(Attribute::new(attr, Some(d.as_str())));
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Media {
     pub kind: String,
@@ -122,6 +194,18 @@ impl Media {
         let prefix = format!("{payload} ");
         self.attribute_values("fmtp")
             .find_map(|v| v.strip_prefix(&prefix))
+    }
+
+    /// RFC 3312 media preconditions carried on this `m=` line, if any.
+    pub fn precondition(&self) -> Option<Precondition> {
+        let has = ["createmedia", "status", "confirmed"]
+            .iter()
+            .any(|a| self.attribute(a).is_some());
+        if has {
+            Some(Precondition::from_media(self))
+        } else {
+            None
+        }
     }
 }
 
@@ -358,6 +442,8 @@ impl Sdp {
     /// Answer an AMR-WB offer with the offered payload and mode-set.
     pub fn answer_amr_wb(offer: &Sdp, local_address: &str) -> Result<Sdp, SdpError> {
         let media = offer.audio().ok_or(SdpError::Missing("audio m="))?;
+        // RFC 3312: carry the offer's media preconditions into the answer.
+        let precond = media.precondition();
         let payload = media
             .payload_type("AMR-WB", 16_000)
             .ok_or(SdpError::Missing("AMR-WB payload"))?;
@@ -416,18 +502,58 @@ impl Sdp {
             connection: Some(Connection::ip4(local_address)),
             bandwidths: Vec::new(),
             attributes: Vec::new(),
-            media: vec![Media {
-                kind: "audio".into(),
-                port: 49_172,
-                protocol: "RTP/AVP".into(),
-                formats,
-                connection: Some(Connection::ip4(local_address)),
-                bandwidths: Vec::new(),
-                attributes,
-                other: Vec::new(),
+            media: vec![{
+                let mut answer_media = Media {
+                    kind: "audio".into(),
+                    port: 49_172,
+                    protocol: "RTP/AVP".into(),
+                    formats,
+                    connection: Some(Connection::ip4(local_address)),
+                    bandwidths: Vec::new(),
+                    attributes,
+                    other: Vec::new(),
+                };
+                if let Some(p) = precond {
+                    p.push_to(&mut answer_media);
+                }
+                answer_media
             }],
             other: Vec::new(),
         })
+    }
+
+    /// Add RFC 3312 media preconditions (`sendrecv`) to every media line.
+    ///
+    /// The UE sends this in the early INVITE; once the local bearers are up it
+    /// flips `status` to `sendrecv` and, after the peer acknowledges, sets
+    /// `confirmed`. This is negotiation state only — no bearers are touched.
+    pub fn add_preconditions(&mut self) {
+        let p = Precondition {
+            createmedia: Some(PrecondDir::SendRecv),
+            status: Some(PrecondDir::SendRecv),
+            confirmed: Some(PrecondDir::SendRecv),
+        };
+        for m in &mut self.media {
+            p.push_to(m);
+        }
+    }
+
+    /// Mark the media preconditions confirmed (`a=confirmed:sendrecv`) after the
+    /// peer has acknowledged its resources. Returns the number of lines updated.
+    pub fn confirm_preconditions(&mut self) -> usize {
+        let mut n = 0;
+        for m in &mut self.media {
+            if m.attribute("confirmed").is_some() {
+                m.attributes
+                    .retain(|a| !a.name.eq_ignore_ascii_case("confirmed"));
+                m.attributes.push(Attribute::new(
+                    "confirmed",
+                    Some(PrecondDir::SendRecv.as_str()),
+                ));
+                n += 1;
+            }
+        }
+        n
     }
 }
 
@@ -582,5 +708,69 @@ a=sendrecv\r\n";
     fn rejects_missing_version() {
         let e = Sdp::parse("o=- 0 0 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n").unwrap_err();
         assert_eq!(e, SdpError::Missing("v=0"));
+    }
+
+    const PRECOND_OFFER: &str = "v=0\r\n\
+o=- 0 0 IN IP4 192.0.2.10\r\n\
+s=-\r\n\
+c=IN IP4 192.0.2.10\r\n\
+t=0 0\r\n\
+m=audio 49170 RTP/AVP 116\r\n\
+a=rtpmap:116 AMR-WB/16000/1\r\n\
+a=createmedia:sendrecv\r\n\
+a=status:send\r\n\
+a=confirmed:sendrecv\r\n";
+
+    #[test]
+    fn parses_rfc3312_preconditions() {
+        let s = Sdp::parse(PRECOND_OFFER).unwrap();
+        let p = s.audio().unwrap().precondition().expect("preconditions");
+        assert_eq!(p.createmedia, Some(PrecondDir::SendRecv));
+        assert_eq!(p.status, Some(PrecondDir::Send));
+        assert_eq!(p.confirmed, Some(PrecondDir::SendRecv));
+        // Not yet met: local status is only `send`, not `sendrecv`.
+        assert!(!p.met());
+    }
+
+    #[test]
+    fn preconditions_are_met_when_status_sendrecv() {
+        let mut s = Sdp::parse(PRECOND_OFFER).unwrap();
+        let m = s.audio_mut().unwrap();
+        m.attributes
+            .retain(|a| !a.name.eq_ignore_ascii_case("status"));
+        m.attributes
+            .push(Attribute::new("status", Some("sendrecv")));
+        assert!(s.audio().unwrap().precondition().unwrap().met());
+    }
+
+    #[test]
+    fn answer_echoes_preconditions() {
+        let offer = Sdp::parse(PRECOND_OFFER).unwrap();
+        let answer = Sdp::answer_amr_wb(&offer, "192.0.2.11").unwrap();
+        let p = answer
+            .audio()
+            .unwrap()
+            .precondition()
+            .expect("answer precond");
+        assert_eq!(p.createmedia, Some(PrecondDir::SendRecv));
+        assert_eq!(p.confirmed, Some(PrecondDir::SendRecv));
+    }
+
+    #[test]
+    fn build_offer_preconditions_round_trip() {
+        let mut offer = Sdp::amr_wb_offer(&[0, 1, 2, 3], false, "192.0.2.10");
+        offer.add_preconditions();
+        let text = offer.to_text();
+        let mut parsed = Sdp::parse(&text).unwrap();
+        let p = parsed.audio().unwrap().precondition().unwrap();
+        assert_eq!(p.createmedia, Some(PrecondDir::SendRecv));
+        assert_eq!(p.status, Some(PrecondDir::SendRecv));
+        assert!(p.met());
+        // Confirming flips `a=confirmed` and keeps it present.
+        assert_eq!(parsed.confirm_preconditions(), 1);
+        assert_eq!(
+            parsed.audio().unwrap().attribute("confirmed"),
+            Some("sendrecv")
+        );
     }
 }

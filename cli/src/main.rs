@@ -747,6 +747,10 @@ fn run_real(opts: &Options, deregister: bool) -> Result<(), String> {
             RegistrationEvent::Failed(status) => {
                 return Err(format!("REGISTER failed with {status}"));
             }
+            RegistrationEvent::Deregistered => {
+                eprintln!("hyphae: registration removed by the network");
+                return Ok(());
+            }
             RegistrationEvent::Challenge(challenge) => {
                 let res = resolve_res(opts, &response)?;
                 let cnonce = generate_cnonce();
@@ -784,6 +788,10 @@ fn run_real(opts: &Options, deregister: bool) -> Result<(), String> {
                     }
                     RegistrationEvent::Failed(status) => {
                         return Err(format!("challenged REGISTER failed with {status}"))
+                    }
+                    RegistrationEvent::Deregistered => {
+                        eprintln!("hyphae: registration removed by the network");
+                        return Ok(());
                     }
                     RegistrationEvent::Challenge(_) => {
                         return Err("server re-challenged the authorized REGISTER".into())

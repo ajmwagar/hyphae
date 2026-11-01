@@ -104,6 +104,7 @@ dependencies = [
  "carrier",
  "md5",
  "sip",
+ "transport",
 ]
 
 [[package]]
