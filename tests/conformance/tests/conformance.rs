@@ -614,3 +614,109 @@ fn inv_002_preconditions_offered_and_answered() {
     assert!(answer.to_text().contains("a=createmedia:sendrecv"));
     assert!(answer.to_text().contains("a=confirmed:sendrecv"));
 }
+
+// --- MEDIA-001: RTP/RTCP framing, jitter buffer, PLC ----------------------
+
+#[test]
+fn media_001_rtp_amr_frame_round_trips_the_wire() {
+    use codec_amr::rtp::Payload;
+    use media::amr_rtp::{AmrRtp, MediaEncoder};
+    use media::packet::RtpPacket;
+
+    // Encode one AMR-WB speech frame into an RTP packet over the wire.
+    let mut enc = MediaEncoder::new(AmrRtp::amr_wb(0x00ff_00ff));
+    let payload = Payload::single_speech(8, vec![0xA5; 60], true).unwrap();
+    let packet = enc.encode(&payload).unwrap();
+    let wire = packet.encode().unwrap();
+
+    // Parse it back exactly as a receiver would.
+    let parsed = RtpPacket::decode(&wire).unwrap();
+    assert_eq!(parsed.payload_type, media::AMR_WB_PAYLOAD_TYPE);
+    assert_eq!(parsed.sequence, 1);
+    assert_eq!(parsed.timestamp, 0);
+    assert!(parsed.marker);
+    assert_eq!(parsed.ssrc, 0x00ff_00ff);
+
+    // The RTP payload is still a valid RFC 4867 octet-aligned AMR payload.
+    let back = AmrRtp::amr_wb(0x00ff_00ff)
+        .parse_payload(&parsed.payload)
+        .unwrap();
+    assert_eq!(back, payload);
+
+    // The second frame advances the timestamp by one 20 ms tick (320 @16k).
+    let next = enc.encode(&payload).unwrap();
+    assert_eq!(next.sequence, 2);
+    assert_eq!(next.timestamp, media::AMR_WB_FRAME_SAMPLES as u32);
+}
+
+#[test]
+fn media_001_rtcp_sender_report_survives_the_wire() {
+    use media::rtcp::{fraction_lost, ReportBlock, RtcpPacket, SenderReport};
+
+    let block = ReportBlock {
+        ssrc: 0x1122_3344,
+        fraction_lost: fraction_lost(100, 90),
+        cumulative_lost: -10,
+        expected: 100,
+        received: 90,
+        jitter: 7,
+        last_sender_report: 0xaa55_bb66,
+        delay: 2000,
+    };
+    let sr = SenderReport {
+        ssrc: 0xdead_beef,
+        ntp_seconds: 0x0123_4567,
+        ntp_fraction: 0x89ab_cdef,
+        rtp_timestamp: 0x1122_3344,
+        packet_count: 42,
+        octet_count: 42 * 40,
+        blocks: vec![block],
+    };
+    let bytes = sr.to_bytes();
+    let (parsed, consumed) = RtcpPacket::parse(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    let RtcpPacket::Sender(got) = parsed else {
+        panic!("expected SR")
+    };
+    assert_eq!(got.packet_count, 42);
+    assert_eq!(got.octet_count, 42 * 40);
+    assert_eq!(got.blocks.len(), 1);
+    assert_eq!(got.blocks[0].cumulative_lost, -10);
+    assert_eq!(got.blocks[0].fraction_lost, fraction_lost(100, 90));
+}
+
+#[test]
+fn media_001_jitter_buffer_reorders_and_flags_loss() {
+    use media::jitter::{JitterBuffer, PushResult};
+    use media::packet::RtpPacket;
+
+    let mut jb = JitterBuffer::new(0);
+    // Anchor is 1; arrivals come 3, 2, 5 (out of order) with a hole at 4.
+    assert_eq!(jb.push(RtpPacket::new(97, 1, 0, 1)), PushResult::Accepted);
+    assert_eq!(jb.push(RtpPacket::new(97, 3, 0, 1)), PushResult::Accepted);
+    assert_eq!(jb.push(RtpPacket::new(97, 2, 0, 1)), PushResult::Accepted);
+    assert_eq!(jb.push(RtpPacket::new(97, 5, 0, 1)), PushResult::Accepted);
+    // In-order release: 1, 2, 3, then 5 with 4 declared lost.
+    let mut seqs = Vec::new();
+    for _ in 0..4 {
+        if let Some(p) = jb.pop() {
+            seqs.push(p.sequence);
+        }
+    }
+    assert_eq!(seqs, vec![1, 2, 3, 5]);
+    assert!(jb.take_losses().contains(&4));
+}
+
+#[test]
+fn media_001_plc_conceals_a_lost_frame() {
+    use media::plc::Plc;
+
+    let mut plc = Plc::new(media::AMR_WB_FRAME_SAMPLES);
+    let good = vec![100i16; media::AMR_WB_FRAME_SAMPLES];
+    plc.note_good_frame(&good);
+    let concealed = plc.conceal_frame();
+    assert_eq!(concealed.len(), media::AMR_WB_FRAME_SAMPLES);
+    // First concealed frame is faded to half the held amplitude.
+    assert_eq!(concealed[0], 50);
+    assert_eq!(plc.fade_frames(), 1);
+}

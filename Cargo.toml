@@ -7,6 +7,7 @@ members = [
     "carrier",
     "codec",
     "codec-amr",
+    "media",
     "transport",
     "cli",
     "tests/conformance",
@@ -25,4 +26,5 @@ ims = { path = "ims" }
 carrier = { path = "carrier" }
 codec = { path = "codec" }
 codec-amr = { path = "codec-amr" }
+media = { path = "media" }
 transport = { path = "transport" }
