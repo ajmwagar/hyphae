@@ -53,6 +53,24 @@ hyphae-epdg: DNS 10.32.0.1
   boundary is not on the wire. `AT_RAND` arrives as 20 octets for a 16-octet
   value.
 
+## NAT traversal
+
+`--force-nat-t` exercises the encapsulated path even when the path has no NAT,
+so the 4500 framing can be tested on its own:
+
+```sh
+epdg-lab --listen 0.0.0.0:500            # binds 500 and 4500
+epdg-lab --connect <host>:500 --force-nat-t
+```
+
+Verified end to end across a real WAN (a Mac on one side, `pris` on the other):
+IKE_SA_INIT on 500, then every IKE_AUTH datagram on 4500 with the 4-octet
+non-ESP marker, exchange complete. The same path is covered by
+`the_ike_exchange_completes_with_udp_encapsulation`, which uses two sockets to
+stand in for 500 and 4500. Detection itself is exercised by the unit tests and by
+`epdg::sa`'s notify round-trip; a tailnet path passes addresses through
+unchanged, so it correctly reports no NAT.
+
 ## Interop notes
 
 Driving the client against strongSwan is possible up to a point, and the point

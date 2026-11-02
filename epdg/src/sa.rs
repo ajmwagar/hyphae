@@ -77,6 +77,10 @@ pub struct SaInitInitiator {
     keypair: DhKeyPair,
     nonce_i: Vec<u8>,
     responder_spi: Option<[u8; 8]>,
+    /// Local and peer UDP endpoints, when the caller wants NAT detection.
+    endpoints: Option<(crate::natt::Endpoint, crate::natt::Endpoint)>,
+    /// Set once the responder's notifies have been evaluated.
+    nat: Option<crate::natt::NatVerdict>,
 }
 
 impl SaInitInitiator {
@@ -99,7 +103,28 @@ impl SaInitInitiator {
             keypair: DhKeyPair::from_private(dh_group, private_exponent)?,
             nonce_i,
             responder_spi: None,
+            endpoints: None,
+            nat: None,
         })
+    }
+
+    /// Enable NAT detection (RFC 7296 §2.23) for this exchange.
+    ///
+    /// The initiator must be told its own address/port *as it believes them*
+    /// and the peer's, because the whole mechanism is a comparison between what
+    /// each side claims and what the other observes.
+    pub fn with_endpoints(
+        mut self,
+        local: crate::natt::Endpoint,
+        peer: crate::natt::Endpoint,
+    ) -> Self {
+        self.endpoints = Some((local, peer));
+        self
+    }
+
+    /// What NAT detection concluded, once the responder has answered.
+    pub fn nat_verdict(&self) -> Option<crate::natt::NatVerdict> {
+        self.nat
     }
 
     /// The `SAi1, KEi, Ni` message.
@@ -134,30 +159,86 @@ impl SaInitInitiator {
                 ],
             }],
         };
+        let mut payloads = vec![
+            Payload {
+                kind: PayloadType::Sa,
+                critical: false,
+                body: sa.encode(),
+            },
+            Payload {
+                kind: PayloadType::Ke,
+                critical: false,
+                body: Ke {
+                    dh_group: self.keypair.group(),
+                    key_data: self.keypair.public_bytes(),
+                }
+                .encode(),
+            },
+            Payload {
+                kind: PayloadType::Nonce,
+                critical: false,
+                body: self.nonce_i.clone(),
+            },
+        ];
+
+        // RFC 7296 §2.23 puts the NAT-detection notifies just after the nonces.
+        // The responder SPI is still unknown here, so it is hashed as zeros.
+        if let Some((local, peer)) = &self.endpoints {
+            for notify in crate::natt::nat_detection_notifies(
+                self.header.initiator_spi,
+                [0; 8],
+                local.parts(),
+                peer.parts(),
+            ) {
+                payloads.push(Payload {
+                    kind: PayloadType::Notify,
+                    critical: false,
+                    body: notify.encode(),
+                });
+            }
+        }
+
         Message {
             header: self.header,
-            payloads: vec![
-                Payload {
-                    kind: PayloadType::Sa,
-                    critical: false,
-                    body: sa.encode(),
-                },
-                Payload {
-                    kind: PayloadType::Ke,
-                    critical: false,
-                    body: Ke {
-                        dh_group: self.keypair.group(),
-                        key_data: self.keypair.public_bytes(),
-                    }
-                    .encode(),
-                },
-                Payload {
-                    kind: PayloadType::Nonce,
-                    critical: false,
-                    body: self.nonce_i.clone(),
-                },
-            ],
+            payloads,
         }
+    }
+
+    /// Read the responder's NAT-detection notifies and decide.
+    ///
+    /// Called from the response path; does nothing when endpoints were not
+    /// configured.
+    fn evaluate_nat(&mut self, message: &Message) {
+        let Some((local, peer)) = self.endpoints.clone() else {
+            return;
+        };
+        let mut source_hashes: Vec<[u8; 20]> = Vec::new();
+        let mut destination_hash: Option<[u8; 20]> = None;
+        for payload in message
+            .payloads
+            .iter()
+            .filter(|p| p.kind == PayloadType::Notify)
+        {
+            let Ok(notify) = crate::ikev2::Notify::decode(&payload.body) else {
+                continue;
+            };
+            let Ok(hash) = <[u8; 20]>::try_from(notify.data.as_slice()) else {
+                continue;
+            };
+            match notify.notify_type {
+                crate::natt::NAT_DETECTION_SOURCE_IP => source_hashes.push(hash),
+                crate::natt::NAT_DETECTION_DESTINATION_IP => destination_hash = Some(hash),
+                _ => {}
+            }
+        }
+        let detector =
+            crate::natt::NatDetector::new(self.header.initiator_spi, message.header.responder_spi);
+        self.nat = Some(detector.evaluate(
+            &source_hashes,
+            destination_hash.as_ref(),
+            peer.parts(),
+            local.parts(),
+        ));
     }
 
     /// Consume the responder's `SAr1, KEr, Nr` and derive the IKE SA keys.
@@ -189,6 +270,7 @@ impl SaInitInitiator {
         let shared = self.keypair.agree(&ke.key_data)?;
         let seed = skeyseed(&self.nonce_i, &nonce_r, &shared);
         self.responder_spi = Some(message.header.responder_spi);
+        self.evaluate_nat(message);
         Ok(derive_keys(
             &seed,
             &self.nonce_i,
