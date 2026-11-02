@@ -18,6 +18,9 @@ pub enum PCscfDiscovery {
     Pco,
     /// DHCPv4/v6 option 120 (RFC 3361/3319).
     Dhcp,
+    /// RFC 3263 NAPTR/SRV on the IMS home domain, the fallback TS 24.229
+    /// points at when the network provides nothing over PCO or DHCP.
+    Dns,
 }
 
 impl PCscfDiscovery {
@@ -26,9 +29,10 @@ impl PCscfDiscovery {
             "static" => Ok(Self::Static),
             "pco" => Ok(Self::Pco),
             "dhcp" => Ok(Self::Dhcp),
+            "dns" => Ok(Self::Dns),
             other => Err(ProfileError::Invalid {
                 field: "p_cscf_discovery",
-                detail: format!("unknown mode {other:?} (static|pco|dhcp)"),
+                detail: format!("unknown mode {other:?} (static|pco|dhcp|dns)"),
             }),
         }
     }
@@ -38,6 +42,7 @@ impl PCscfDiscovery {
             Self::Static => "static",
             Self::Pco => "pco",
             Self::Dhcp => "dhcp",
+            Self::Dns => "dns",
         }
     }
 }

@@ -2754,3 +2754,70 @@ fn epdg_019_pani_reports_the_access_network() {
     );
     assert!(eutran.is_3gpp());
 }
+
+// --- SIP-006: P-CSCF discovery over DNS (RFC 3263) ----------------------
+
+#[test]
+fn sip_006_pcscf_discovery_follows_rfc3263() {
+    use ims::pcscf::{order_naptr, order_srv, srv_name, Candidate, Naptr, Srv, Transport};
+
+    // Query names come from the IANA service registry via RFC 3263 §4.1–4.2.
+    assert_eq!(Transport::Udp.naptr_service(), "SIP+D2U");
+    assert_eq!(Transport::Tcp.naptr_service(), "SIP+D2T");
+    assert_eq!(Transport::Tls.naptr_service(), "SIPS+D2T");
+    assert_eq!(
+        srv_name(Transport::Udp, "ims.mnc260.mcc310.3gppnetwork.org"),
+        "_sip._udp.ims.mnc260.mcc310.3gppnetwork.org"
+    );
+    assert_eq!(
+        srv_name(Transport::Tls, "ims.mnc260.mcc310.3gppnetwork.org"),
+        "_sips._tcp.ims.mnc260.mcc310.3gppnetwork.org"
+    );
+
+    // NAPTR: lowest order wins, then lowest preference (RFC 3263 §4.1).
+    let naptr = |order, preference, service: &str| Naptr {
+        order,
+        preference,
+        service: service.into(),
+        flags: "S".into(),
+        replacement: String::new(),
+    };
+    let ordered = order_naptr(&[
+        naptr(100, 50, "SIP+D2U"),
+        naptr(50, 50, "SIPS+D2T"),
+        naptr(100, 10, "SIP+D2T"),
+    ]);
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|r| r.service.as_str())
+            .collect::<Vec<_>>(),
+        vec!["SIPS+D2T", "SIP+D2T", "SIP+D2U"]
+    );
+
+    // SRV: priority first, then the RFC 2782 weighted draw.
+    let srv = |priority, weight, target: &str| Srv {
+        priority,
+        weight,
+        port: 5060,
+        target: target.into(),
+    };
+    let ordered = order_srv(
+        &[
+            srv(20, 10, "backup.example.com"),
+            srv(10, 10, "a.example.com"),
+            srv(10, 1, "b.example.com"),
+        ],
+        |_| 0,
+    );
+    assert_eq!(ordered[0].target, "a.example.com");
+    assert_eq!(ordered[1].target, "b.example.com");
+    assert_eq!(ordered[2].target, "backup.example.com");
+
+    // The result is what the profile consumes: host:port endpoints.
+    assert_eq!(
+        Candidate::new(Transport::Udp, "pcscf.example.com", None).endpoint,
+        "pcscf.example.com:5060"
+    );
+    assert_eq!(Transport::Tls.default_port(), 5061);
+}
