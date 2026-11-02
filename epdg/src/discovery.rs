@@ -82,16 +82,165 @@ pub fn epdg_fqdn_lac(plmn: &PlmnId, lac: u16) -> String {
 ///
 /// A roaming UE resolves this to learn whether the visited country requires an
 /// ePDG in that country; its NAPTR records point at the permitted ePDG names.
-pub fn visited_country_fqdn(mcc: &str) -> Result<String, DiscoveryError> {
-    if mcc.len() != 3 || !mcc.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(DiscoveryError::BadMcc(mcc.to_string()));
+fn validate_mcc(mcc: &str) -> Result<(), DiscoveryError> {
+    if mcc.len() == 3 && mcc.bytes().all(|b| b.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(DiscoveryError::BadMcc(mcc.to_string()))
     }
+}
+
+pub fn visited_country_fqdn(mcc: &str) -> Result<String, DiscoveryError> {
+    validate_mcc(mcc)?;
     Ok(format!("epdg.epc.mcc{mcc}.visited-country.{EPDG_SUFFIX}"))
+}
+
+// --- Emergency discovery names (TS 23.003 §19.4.2.9A) -------------------
+//
+// Every name in §19.4.2.9A is the non-emergency name with the label `sos`
+// inserted before `epdg.epc` (or `en.epc` for the emergency-number lookup).
+// The pair is kept adjacent on purpose: a reader comparing them should see no
+// difference other than that one label.
+
+/// The label that marks a name as belonging to emergency services.
+pub const SOS_LABEL: &str = "sos";
+
+/// The Operator Identifier based Emergency ePDG FQDN
+/// (TS 23.003 §19.4.2.9A.2).
+///
+/// ```text
+/// sos.epdg.epc.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org
+/// ```
+///
+/// A UE in limited service state uses this to find an ePDG that will accept an
+/// unauthenticated emergency session.
+pub fn emergency_epdg_fqdn(plmn: &PlmnId) -> String {
+    format!(
+        "{SOS_LABEL}.epdg.epc.{}.{}",
+        plmn.plmn_labels(),
+        EPDG_SUFFIX
+    )
+}
+
+/// The Tracking Area Identity based Emergency ePDG FQDN, 2-octet TAC
+/// (TS 23.003 §19.4.2.9A.3).
+pub fn emergency_epdg_fqdn_tai(plmn: &PlmnId, tac: u16) -> String {
+    let lo = (tac & 0x00ff) as u8;
+    let hi = (tac >> 8) as u8;
+    format!(
+        "tac-lb{lo:02x}.tac-hb{hi:02x}.tac.{SOS_LABEL}.epdg.epc.{}.{}",
+        plmn.plmn_labels(),
+        EPDG_SUFFIX
+    )
+}
+
+/// The 5GS Tracking Area Identity based Emergency ePDG FQDN, 3-octet TAC
+/// (TS 23.003 §19.4.2.9A.3).
+pub fn emergency_epdg_fqdn_5gs_tai(plmn: &PlmnId, tac: u32) -> String {
+    let lo = (tac & 0x0000_00ff) as u8;
+    let mid = ((tac >> 8) & 0x0000_00ff) as u8;
+    let hi = ((tac >> 16) & 0x0000_00ff) as u8;
+    format!(
+        "tac-lb{lo:02x}.tac-mb{mid:02x}.tac-hb{hi:02x}.5gstac.{SOS_LABEL}.epdg.epc.{}.{}",
+        plmn.plmn_labels(),
+        EPDG_SUFFIX
+    )
+}
+
+/// The Location Area Identity based Emergency ePDG FQDN
+/// (TS 23.003 §19.4.2.9A.3).
+pub fn emergency_epdg_fqdn_lac(plmn: &PlmnId, lac: u16) -> String {
+    format!(
+        "lac{lac:04x}.{SOS_LABEL}.epdg.epc.{}.{}",
+        plmn.plmn_labels(),
+        EPDG_SUFFIX
+    )
+}
+
+/// The Visited Country Emergency FQDN (TS 23.003 §19.4.2.9A.4).
+///
+/// Its NAPTR records point at the Operator Identifier based Emergency ePDG
+/// FQDNs that the visited country permits.
+pub fn emergency_visited_country_fqdn(mcc: &str) -> Result<String, DiscoveryError> {
+    validate_mcc(mcc)?;
+    Ok(format!(
+        "{SOS_LABEL}.epdg.epc.mcc{mcc}.visited-country.{EPDG_SUFFIX}"
+    ))
+}
+
+/// The Country based Emergency Numbers FQDN (TS 23.003 §19.4.2.9A.6).
+///
+/// This is the Visited Country Emergency FQDN with `epdg` replaced by `en`. A
+/// roaming UE resolves it to learn the visited country's emergency numbers and
+/// their service types, which is how it avoids dialling a number that is not
+/// emergency in the country it is actually in.
+pub fn emergency_numbers_fqdn(mcc: &str) -> Result<String, DiscoveryError> {
+    validate_mcc(mcc)?;
+    Ok(format!(
+        "{SOS_LABEL}.en.epc.mcc{mcc}.visited-country.{EPDG_SUFFIX}"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every expected string below is one of the examples printed in
+    // TS 23.003 §19.4.2.9A.2–19.4.2.9A.6.
+
+    #[test]
+    fn emergency_operator_identifier_fqdn_adds_the_sos_label() {
+        assert_eq!(
+            emergency_epdg_fqdn(&plmn()),
+            "sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+        );
+    }
+
+    #[test]
+    fn emergency_tracking_area_fqdn_adds_the_sos_label_before_epdg() {
+        assert_eq!(
+            emergency_epdg_fqdn_tai(&plmn(), 0x0B21),
+            "tac-lb21.tac-hb0b.tac.sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+        );
+    }
+
+    #[test]
+    fn emergency_location_area_fqdn_adds_the_sos_label_before_epdg() {
+        assert_eq!(
+            emergency_epdg_fqdn_lac(&plmn(), 0x0B21),
+            "lac0b21.sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+        );
+    }
+
+    #[test]
+    fn emergency_five_gs_tracking_area_fqdn_adds_the_sos_label_before_epdg() {
+        assert_eq!(
+            emergency_epdg_fqdn_5gs_tai(&plmn(), 0x0B1A21),
+            "tac-lb21.tac-mb1a.tac-hb0b.5gstac.sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+        );
+    }
+
+    #[test]
+    fn visited_country_emergency_fqdn_adds_the_sos_label() {
+        assert_eq!(
+            emergency_visited_country_fqdn("345").unwrap(),
+            "sos.epdg.epc.mcc345.visited-country.pub.3gppnetwork.org"
+        );
+    }
+
+    #[test]
+    fn emergency_numbers_fqdn_replaces_epdg_with_en() {
+        assert_eq!(
+            emergency_numbers_fqdn("345").unwrap(),
+            "sos.en.epc.mcc345.visited-country.pub.3gppnetwork.org"
+        );
+    }
+
+    #[test]
+    fn emergency_names_reject_a_bad_mcc_like_the_non_emergency_ones() {
+        assert!(emergency_visited_country_fqdn("34").is_err());
+        assert!(emergency_numbers_fqdn("3456").is_err());
+    }
 
     // Every expected string below is one of the examples printed in
     // TS 23.003 §19.4.2.9.2–19.4.2.9.4 (MCC 345, MNC 12).

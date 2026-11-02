@@ -924,14 +924,15 @@ fn e911_001_emergency_invite_targets_the_service_urn() {
     );
     assert!(id.is_temporary());
 
-    // TS 24.229 §5.1.6.3: Request-URI is the service URN and the request
-    // carries Resource-Priority: esnet.0.
+    // TS 24.229 §5.1.6.8.3 items 2 and 3: Request-URI is the service URN and
+    // To carries the same URN. §4.7: the UE never sends the esnet namespace.
     let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
         .invite()
         .unwrap();
     assert_eq!(request.method, sip::Method::Invite);
     assert_eq!(request.uri, "urn:service:sos");
-    assert_eq!(request.headers.get("resource-priority"), Some("esnet.0"));
+    assert_eq!(request.headers.get("resource-priority"), None);
+    assert_eq!(request.headers.get("priority"), Some("emergency"));
     assert!(request
         .headers
         .get("to")
@@ -954,7 +955,12 @@ fn e911_001_geolocation_is_routed_as_pidf_lo() {
         .invite()
         .unwrap();
 
-    // RFC 6442: the location is eligible for routing.
+    // RFC 6442: the Geolocation header names the body part by Content-ID,
+    // and the body carries it.
+    assert_eq!(
+        request.headers.get("geolocation"),
+        Some("<cid:emergency-location@192.0.2.10>")
+    );
     assert_eq!(request.headers.get("geolocation-routing"), Some("yes"));
     assert_eq!(
         request.headers.get("content-type"),
@@ -2947,4 +2953,134 @@ fn gba_002_ks_naf_matches_the_annex_b3_derivation() {
         ks_naf(&ks, &rand, impi, naf_id).unwrap()
     );
     assert_eq!(LABEL_GBA_U, b"gba-u");
+}
+
+// --- E911-002: emergency registration -----------------------------------
+
+#[test]
+fn e911_002_emergency_registration_marks_the_contact_with_sos() {
+    use ims::emergency::{EmergencyIdentity, EmergencyRegistration};
+
+    // TS 24.229 §5.1.6.2 b: an unregistered UE registers with a temporary
+    // identity derived from the IMSI.
+    let id = EmergencyIdentity::temporary_from_imsi(
+        "001010000000001",
+        "ims.mnc001.mcc001.3gppnetwork.org",
+    );
+    let request = EmergencyRegistration::new(id, "192.0.2.10", 5060, 600)
+        .with_pani("IEEE-802.11; i-wlan-node-id=001122334455")
+        .register("sip:ims.mnc001.mcc001.3gppnetwork.org", "192.0.2.10", 5060);
+
+    assert_eq!(request.method, sip::Method::Register);
+    // §5.1.6.2 a and §7.2A.13: the `sos` URI parameter on the Contact is what
+    // marks this as an emergency registration. There is no `Service` header.
+    assert_eq!(
+        request.headers.get("contact"),
+        Some("<sip:001010000000001@192.0.2.10:5060;sos>")
+    );
+    assert_eq!(request.headers.get("service"), None);
+    // §5.1.6.2 b: From and To carry the same identity.
+    assert_eq!(
+        request.headers.get("from"),
+        Some("<sip:001010000000001@ims.mnc001.mcc001.3gppnetwork.org>;tag=emerg-reg-5060")
+    );
+    assert_eq!(
+        request.headers.get("to"),
+        Some("<sip:001010000000001@ims.mnc001.mcc001.3gppnetwork.org>")
+    );
+    // An initial emergency registration is unauthenticated.
+    assert_eq!(request.headers.get("authorization"), None);
+    assert_eq!(request.headers.get("expires"), Some("600"));
+    assert_eq!(request.headers.get("content-length"), Some("0"));
+    assert!(request.body.is_empty());
+}
+
+// --- E911-003: emergency INVITE bodies ----------------------------------
+
+#[test]
+fn e911_003_location_and_offer_share_a_multipart_body() {
+    use ims::emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
+
+    let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+    let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+        .with_geolocation(Geolocation::new(48.8584, 2.2945).unwrap())
+        .with_offer_sdp("v=0\r\no=- 1 1 IN IP4 192.0.2.10\r\n")
+        .with_pani("IEEE-802.11; i-wlan-node-id=001122334455")
+        .with_current_location_discovery()
+        .invite()
+        .unwrap();
+
+    // TS 24.229 §5.1.6.8.3 item 7: the PIDF-LO is a body part referenced by a
+    // Content-ID URL from the Geolocation header — and item 9's counterpart:
+    // the media offer is not replaced by the location.
+    assert_eq!(
+        request.headers.get("content-type"),
+        Some("multipart/mixed; boundary=fungos-emergency")
+    );
+    let body = String::from_utf8(request.body.clone()).unwrap();
+    assert!(body.contains("Content-ID: <emergency-location@192.0.2.10>"));
+    assert!(body.contains("Content-Disposition: render; handling=optional"));
+    assert!(body.contains("Content-Type: application/pidf+xml"));
+    assert!(body.contains("Content-Type: application/sdp"));
+    assert!(body.contains("<gml:pos>48.858400 2.294500</gml:pos>"));
+    assert!(body.contains("v=0"));
+    assert!(body.ends_with("--fungos-emergency--\r\n"));
+
+    // Item 4 and item 10.
+    assert_eq!(
+        request.headers.get("p-access-network-info"),
+        Some("IEEE-802.11; i-wlan-node-id=001122334455")
+    );
+    assert_eq!(
+        request.headers.get("recv-info"),
+        Some("g.3gpp.current-location-discovery")
+    );
+
+    // §5.1.6.8.3 item 9: with no location at all, no Geolocation header.
+    let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+    let bare = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+        .with_offer_sdp("v=0\r\n")
+        .invite()
+        .unwrap();
+    assert_eq!(bare.headers.get("geolocation"), None);
+    assert_eq!(bare.headers.get("geolocation-routing"), None);
+    assert_eq!(bare.headers.get("content-type"), Some("application/sdp"));
+}
+
+// --- EPDG-021: emergency discovery names --------------------------------
+
+#[test]
+fn epdg_021_emergency_discovery_fqdns_match_the_specification_examples() {
+    use epdg::discovery::{
+        emergency_epdg_fqdn, emergency_epdg_fqdn_5gs_tai, emergency_epdg_fqdn_lac,
+        emergency_epdg_fqdn_tai, emergency_numbers_fqdn, emergency_visited_country_fqdn, PlmnId,
+    };
+
+    // TS 23.003 §19.4.2.9A uses the same MCC 345 / MNC 12 examples.
+    let plmn = PlmnId::new("345", "12").unwrap();
+    assert_eq!(
+        emergency_epdg_fqdn(&plmn),
+        "sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        emergency_epdg_fqdn_tai(&plmn, 0x0B21),
+        "tac-lb21.tac-hb0b.tac.sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        emergency_epdg_fqdn_lac(&plmn, 0x0B21),
+        "lac0b21.sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        emergency_epdg_fqdn_5gs_tai(&plmn, 0x0B1A21),
+        "tac-lb21.tac-mb1a.tac-hb0b.5gstac.sos.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        emergency_visited_country_fqdn("345").unwrap(),
+        "sos.epdg.epc.mcc345.visited-country.pub.3gppnetwork.org"
+    );
+    // §19.4.2.9A.6: `epdg` is replaced by `en` for emergency numbers.
+    assert_eq!(
+        emergency_numbers_fqdn("345").unwrap(),
+        "sos.en.epc.mcc345.visited-country.pub.3gppnetwork.org"
+    );
 }

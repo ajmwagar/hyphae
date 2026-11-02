@@ -20,9 +20,19 @@
 //!   temporary identity derived from the IMSI when the UE is not registered.
 //! * **Location** (RFC 4119 / RFC 5491 PIDF-LO): a geodetic point that the UE
 //!   attaches so the network can route the call.
-//! * **Emergency INVITE** (TS 24.229 §5.1.6.3): Request-URI = service URN,
-//!   `Resource-Priority: esnet.0` (RFC 4412), and the PIDF-LO body with
-//!   `Geolocation-Routing: yes` (RFC 6442).
+//! * **Emergency registration** (TS 24.229 §5.1.6.2): a REGISTER whose
+//!   `Contact` carries the `sos` URI parameter, unauthenticated, with `From`
+//!   and `To` set to the identity from item b.
+//! * **Emergency INVITE** (TS 24.229 §5.1.6.8.3): Request-URI = service URN,
+//!   the PIDF-LO in a body part referenced by `cid:` from `Geolocation`, the
+//!   SDP offer alongside it, and `Geolocation-Routing: yes` (RFC 6442).
+//!
+//! Two things this module deliberately does **not** do, because TS 24.229 says
+//! the UE must not: it sends no `Service: sos` header (the marker is the
+//! `sos` URI parameter on the Contact), and it sends no `Resource-Priority`
+//! `esnet` namespace (§4.7: "There is no usage of this namespace from the UE,
+//! and when this namespace is used, the trust domain implementation is set to
+//! remove it if it occurs from the UE").
 
 #![forbid(unsafe_code)]
 
@@ -56,6 +66,10 @@ pub enum SosService {
     Poison,
     /// `urn:service:sos.police`.
     Police,
+    /// `urn:service:sos.ecall.manual` (TS 24.229 §5.1.6.8.1).
+    EcallManual,
+    /// `urn:service:sos.ecall.automatic` (TS 24.229 §5.1.6.8.1).
+    EcallAutomatic,
 }
 
 impl SosService {
@@ -72,6 +86,8 @@ impl SosService {
             SosService::Physician => "urn:service:sos.physician",
             SosService::Poison => "urn:service:sos.poison",
             SosService::Police => "urn:service:sos.police",
+            SosService::EcallManual => "urn:service:sos.ecall.manual",
+            SosService::EcallAutomatic => "urn:service:sos.ecall.automatic",
         }
     }
 
@@ -90,6 +106,8 @@ impl SosService {
             "urn:service:sos.physician" => SosService::Physician,
             "urn:service:sos.poison" => SosService::Poison,
             "urn:service:sos.police" => SosService::Police,
+            "urn:service:sos.ecall.manual" => SosService::EcallManual,
+            "urn:service:sos.ecall.automatic" => SosService::EcallAutomatic,
             _ => return Err(EmergencyError::UnknownService(value.to_string())),
         })
     }
@@ -111,6 +129,8 @@ pub enum EmergencyError {
     BadIdentity(String),
     /// The SDP/body was not valid UTF-8 (internal invariant).
     BodyEncoding,
+    /// A multipart body could not be serialised.
+    Multipart(sip::multipart::MultipartError),
 }
 
 impl core::fmt::Display for EmergencyError {
@@ -126,6 +146,7 @@ impl core::fmt::Display for EmergencyError {
             ),
             EmergencyError::BadIdentity(s) => write!(f, "bad emergency identity: {s}"),
             EmergencyError::BodyEncoding => f.write_str("emergency body was not UTF-8"),
+            EmergencyError::Multipart(e) => write!(f, "multipart body: {e}"),
         }
     }
 }
@@ -257,8 +278,12 @@ pub struct EmergencyRequest {
     call_id: String,
     cseq: u32,
     geolocation: Option<Geolocation>,
-    /// `Resource-Priority` value. TS 24.229 §5.1.6.3 mandates `esnet.0`.
-    resource_priority: String,
+    /// `P-Access-Network-Info` value, when the access network can describe
+    /// itself (TS 24.229 §5.1.6.8.3 item 4).
+    pani: Option<String>,
+    /// Whether to ask for current-location discovery during the call
+    /// (TS 24.229 §5.1.6.8.3 item 10, §5.1.6.12).
+    current_location_discovery: bool,
     service_route: Vec<String>,
     offer_sdp: Option<String>,
 }
@@ -283,7 +308,8 @@ impl EmergencyRequest {
             call_id: format!("fungos-emergency-{contact_port}@{contact_host}"),
             cseq: 1,
             geolocation: None,
-            resource_priority: "esnet.0".to_string(),
+            pani: None,
+            current_location_discovery: false,
             service_route: Vec::new(),
             offer_sdp: None,
         }
@@ -307,6 +333,27 @@ impl EmergencyRequest {
         self
     }
 
+    /// Attach a `P-Access-Network-Info` value (TS 24.229 §5.1.6.8.3 item 4).
+    ///
+    /// The header carries whatever location identifier the access technology
+    /// defines — a cell id, a line id, or the identity of the WLAN access
+    /// point — and the network may use it for routing.
+    pub fn with_pani(mut self, pani: impl Into<String>) -> Self {
+        self.pani = Some(pani.into());
+        self
+    }
+
+    /// Ask the network to be able to push an updated location during the call
+    /// (TS 24.229 §5.1.6.8.3 item 10).
+    ///
+    /// This adds `Recv-Info: g.3gpp.current-location-discovery` and an `Accept`
+    /// for the matching XML type. It is only meaningful where the IP-CAN
+    /// supports current-location discovery.
+    pub fn with_current_location_discovery(mut self) -> Self {
+        self.current_location_discovery = true;
+        self
+    }
+
     /// The service URN this request targets.
     pub fn urn(&self) -> SosService {
         self.urn
@@ -319,9 +366,17 @@ impl EmergencyRequest {
 
     /// Build the emergency INVITE.
     ///
-    /// The Request-URI is the service URN; the request carries
-    /// `Resource-Priority: esnet.0`, and a PIDF-LO body plus
-    /// `Geolocation-Routing: yes` when a location is attached.
+    /// The Request-URI is the service URN and the `To` header carries the same
+    /// URN (TS 24.229 §5.1.6.8.3 items 2 and 3). When a location is attached,
+    /// the PIDF-LO goes in a body part whose `Content-ID` the `Geolocation`
+    /// header references with `cid:`, together with
+    /// `Geolocation-Routing: yes` (item 7 and 8). If there is also an SDP
+    /// offer, both parts travel in a `multipart/mixed` body — an emergency
+    /// INVITE carries location *and* media, never one instead of the other.
+    ///
+    /// No `Resource-Priority` is added: TS 24.229 §4.7 states there is no usage
+    /// of the `esnet` namespace from the UE, and that the trust domain is set
+    /// to remove it if a UE sends it.
     pub fn invite(&self) -> Result<Request, EmergencyError> {
         let target = self
             .service_route
@@ -334,7 +389,10 @@ impl EmergencyRequest {
             .local_contact
             .strip_prefix("sip:")
             .and_then(|s| s.split('@').nth(1))
-            .unwrap_or(&self.local_contact);
+            .unwrap_or(&self.local_contact)
+            .to_string();
+        // A Content-ID has no port to disambiguate: keep the bare host.
+        let cid_host = host.split(':').next().unwrap_or(&host).to_string();
         headers.push(Header::new(
             "Via",
             format!("SIP/2.0/UDP {host};branch=z9hG4bK-fungos-emerg-1;rport"),
@@ -355,20 +413,65 @@ impl EmergencyRequest {
             "P-Preferred-Identity",
             format!("<{}>", self.identity.uri()),
         ));
-        // TS 24.229 §5.1.6.3: emergency sessions request priority esnet.0.
-        headers.push(Header::new("Resource-Priority", &self.resource_priority));
+        if let Some(pani) = &self.pani {
+            headers.push(Header::new("P-Access-Network-Info", pani.clone()));
+        }
+        if self.current_location_discovery {
+            headers.push(Header::new(
+                "Recv-Info",
+                "g.3gpp.current-location-discovery",
+            ));
+            headers.push(Header::new(
+                "Accept",
+                "application/vnd.3gpp.current-location-discovery+xml",
+            ));
+        }
         headers.push(Header::new("Supported", "100rel, precondition"));
+        // TS 24.229 §5.1.6.8.3 NOTE 5: RFC 3261 suggests `Priority: emergency`.
+        // It has no effect inside the IM CN subsystem, but it makes a capture
+        // unambiguous about what kind of call this is.
+        headers.push(Header::new("Priority", "emergency"));
 
-        let body = match (&self.geolocation, &self.offer_sdp) {
-            (Some(location), _) => {
-                // Location is authoritative for emergency routing.
+        let pidf = self
+            .geolocation
+            .map(|l| l.to_pidf_lo(self.identity.uri()).into_bytes());
+        let sdp = self.offer_sdp.clone().map(String::into_bytes);
+
+        let body = match (pidf, sdp) {
+            (Some(pidf), Some(sdp)) => {
+                let cid = format!("emergency-location@{}", cid_host);
+                headers.push(Header::new("Geolocation", format!("<cid:{cid}>")));
                 headers.push(Header::new("Geolocation-Routing", "yes"));
+                headers.push(Header::new(
+                    "Content-Type",
+                    sip::multipart::content_type(EMERGENCY_BOUNDARY),
+                ));
+                sip::multipart::multipart_mixed(
+                    EMERGENCY_BOUNDARY,
+                    &[
+                        sip::Part::new("application/pidf+xml", &pidf)
+                            .with_content_id(&cid)
+                            .with_disposition("render; handling=optional"),
+                        sip::Part::new("application/sdp", &sdp),
+                    ],
+                )
+                .map_err(EmergencyError::Multipart)?
+            }
+            (Some(pidf), None) => {
+                let cid = format!("emergency-location@{}", cid_host);
+                headers.push(Header::new("Geolocation", format!("<cid:{cid}>")));
+                headers.push(Header::new("Geolocation-Routing", "yes"));
+                headers.push(Header::new("Content-ID", format!("<{cid}>")));
+                headers.push(Header::new(
+                    "Content-Disposition",
+                    "render; handling=optional",
+                ));
                 headers.push(Header::new("Content-Type", "application/pidf+xml"));
-                location.to_pidf_lo(self.identity.uri()).into_bytes()
+                pidf
             }
             (None, Some(sdp)) => {
                 headers.push(Header::new("Content-Type", "application/sdp"));
-                sdp.clone().into_bytes()
+                sdp
             }
             (None, None) => Vec::new(),
         };
@@ -383,6 +486,117 @@ impl EmergencyRequest {
     }
 }
 
+/// The deterministic multipart boundary the emergency body uses.
+///
+/// This tree has no RNG by design, and a fixed boundary keeps captures and
+/// tests reproducible. [`sip::multipart::multipart_mixed`] refuses to serialise
+/// if the marker happens to occur inside a part.
+pub const EMERGENCY_BOUNDARY: &str = "fungos-emergency";
+
+/// Builds the initial emergency `REGISTER` described by TS 24.229 §5.1.6.2.
+///
+/// Like [`EmergencyRequest`], this is construction only: it returns a `Request`
+/// and performs no I/O.
+///
+/// Two things make an emergency registration different from a normal one, and
+/// both are here rather than left to the caller:
+///
+/// * the `Contact` carries the **`sos` URI parameter** (item a, and
+///   §7.2A.13), which is what marks the contact as usable only for emergency
+///   service — there is no `Service:` header involved;
+/// * `From` and `To` carry the identity from item b: the first provisioned
+///   public identity, else the default identity from a normal registration,
+///   else the temporary identity derived from the IMSI.
+///
+/// The request deliberately carries **no `Authorization` header**. An initial
+/// emergency registration is unauthenticated; if the network answers 403/420
+/// with an `alternative-service` of type `emergency` and action
+/// `anonymous-emergencycall`, the UE proceeds with §5.1.6.8.2 instead.
+#[derive(Debug, Clone)]
+pub struct EmergencyRegistration {
+    identity: EmergencyIdentity,
+    contact: String,
+    local_tag: String,
+    call_id: String,
+    cseq: u32,
+    expires: u32,
+    pani: Option<String>,
+}
+
+impl EmergencyRegistration {
+    /// Create an emergency registration for `identity` from `contact_host`.
+    ///
+    /// `expires` is in seconds and is operator policy; TS 24.229 does not fix
+    /// it, so it is a parameter rather than a constant.
+    pub fn new(
+        identity: EmergencyIdentity,
+        contact_host: &str,
+        contact_port: u16,
+        expires: u32,
+    ) -> Self {
+        let user = identity_user(&identity);
+        Self {
+            contact: format!("sip:{user}@{contact_host}:{contact_port}"),
+            identity,
+            local_tag: format!("emerg-reg-{contact_port}"),
+            call_id: format!("fungos-emergency-reg-{contact_port}@{contact_host}"),
+            cseq: 1,
+            expires,
+            pani: None,
+        }
+    }
+
+    /// Attach a `P-Access-Network-Info` value.
+    pub fn with_pani(mut self, pani: impl Into<String>) -> Self {
+        self.pani = Some(pani.into());
+        self
+    }
+
+    /// The `Contact` URI including the `sos` parameter.
+    pub fn contact(&self) -> &str {
+        &self.contact
+    }
+
+    /// The identity used in `From` and `To`.
+    pub fn identity(&self) -> &EmergencyIdentity {
+        &self.identity
+    }
+
+    /// Build the REGISTER request. `registrar` is the Request-URI — normally
+    /// `sip:<home domain>`.
+    pub fn register(&self, registrar: &str, contact_host: &str, contact_port: u16) -> Request {
+        let mut headers = Headers::new();
+        headers.push(Header::new(
+            "Via",
+            format!(
+                "SIP/2.0/UDP {contact_host}:{contact_port};branch=z9hG4bK-fungos-emerg-reg-1;rport"
+            ),
+        ));
+        headers.push(Header::new("Max-Forwards", "70"));
+        headers.push(Header::new(
+            "From",
+            format!("<{}>;tag={}", self.identity.uri(), self.local_tag),
+        ));
+        // §5.1.6.2 b: From and To carry the same identity for a REGISTER.
+        headers.push(Header::new("To", format!("<{}>", self.identity.uri())));
+        headers.push(Header::new("Call-ID", self.call_id.clone()));
+        headers.push(Header::new("CSeq", format!("{} REGISTER", self.cseq)));
+        // §5.1.6.2 a and §7.2A.13: the `sos` URI parameter, not a header.
+        headers.push(Header::new("Contact", format!("<{};sos>", self.contact)));
+        headers.push(Header::new("Expires", self.expires.to_string()));
+        if let Some(pani) = &self.pani {
+            headers.push(Header::new("P-Access-Network-Info", pani.clone()));
+        }
+        headers.push(Header::new("Content-Length", "0"));
+
+        Request {
+            method: Method::Register,
+            uri: registrar.to_string(),
+            headers,
+            body: Vec::new(),
+        }
+    }
+}
 fn identity_user(identity: &EmergencyIdentity) -> &str {
     let uri = identity.uri();
     uri.strip_prefix("sip:")
@@ -458,21 +672,24 @@ mod tests {
     }
 
     #[test]
-    fn emergency_invite_has_urn_ruri_and_resource_priority() {
+    fn emergency_invite_targets_the_urn_and_never_sends_esnet() {
         let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
         let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
             .invite()
             .unwrap();
         assert_eq!(req.method, Method::Invite);
         assert_eq!(req.uri, "urn:service:sos");
-        assert_eq!(req.headers.get("resource-priority"), Some("esnet.0"));
         assert!(req.headers.get("to").unwrap().contains("urn:service:sos"));
+        assert_eq!(req.headers.get("priority"), Some("emergency"));
+        // TS 24.229 §4.7: there is no usage of the esnet namespace from the UE,
+        // and the trust domain removes it if a UE sends it.
+        assert_eq!(req.headers.get("resource-priority"), None);
         assert_eq!(req.headers.get("content-length"), Some("0"));
         assert!(req.body.is_empty());
     }
 
     #[test]
-    fn geolocation_is_attached_as_pidf_lo() {
+    fn geolocation_is_referenced_by_cid_not_carried_bare() {
         let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
         let loc = Geolocation::new(51.5, -0.12).unwrap();
         let req = EmergencyRequest::new(SosService::Fire, id, "192.0.2.10", 5060)
@@ -480,16 +697,110 @@ mod tests {
             .invite()
             .unwrap();
         assert_eq!(req.uri, "urn:service:sos.fire");
+        // RFC 6442: the Geolocation header points at the body part by Content-ID.
+        assert_eq!(
+            req.headers.get("geolocation"),
+            Some("<cid:emergency-location@192.0.2.10>")
+        );
+        assert_eq!(req.headers.get("geolocation-routing"), Some("yes"));
+        assert_eq!(
+            req.headers.get("content-id"),
+            Some("<emergency-location@192.0.2.10>")
+        );
+        assert_eq!(
+            req.headers.get("content-disposition"),
+            Some("render; handling=optional")
+        );
         assert_eq!(
             req.headers.get("content-type"),
             Some("application/pidf+xml")
         );
-        assert_eq!(req.headers.get("geolocation-routing"), Some("yes"));
         let body = String::from_utf8(req.body.clone()).unwrap();
         assert!(body.contains("<gml:pos>51.500000 -0.120000</gml:pos>"));
         assert_eq!(
             req.headers.get("content-length"),
             Some(req.body.len().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn location_and_sdp_travel_together_in_a_multipart_body() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let loc = Geolocation::new(51.5, -0.12).unwrap();
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_geolocation(loc)
+            .with_offer_sdp("v=0\r\no=- 1 1 IN IP4 192.0.2.10\r\n")
+            .invite()
+            .unwrap();
+        assert_eq!(
+            req.headers.get("content-type"),
+            Some("multipart/mixed; boundary=fungos-emergency")
+        );
+        let body = String::from_utf8(req.body.clone()).unwrap();
+        // The PIDF-LO part is the one the Geolocation header names.
+        assert!(body.contains("Content-ID: <emergency-location@192.0.2.10>"));
+        assert!(body.contains("Content-Disposition: render; handling=optional"));
+        assert!(body.contains("Content-Type: application/pidf+xml"));
+        // The SDP offer is not dropped: an emergency call needs media too.
+        assert!(body.contains("Content-Type: application/sdp"));
+        assert!(body.contains("v=0"));
+        assert!(body.ends_with("--fungos-emergency--\r\n"));
+    }
+
+    #[test]
+    fn no_location_means_no_geolocation_headers() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_offer_sdp("v=0\r\n")
+            .invite()
+            .unwrap();
+        // TS 24.229 §5.1.6.8.3 item 9.
+        assert_eq!(req.headers.get("geolocation"), None);
+        assert_eq!(req.headers.get("geolocation-routing"), None);
+        assert_eq!(req.headers.get("content-type"), Some("application/sdp"));
+    }
+
+    #[test]
+    fn pani_and_current_location_discovery_are_opt_in() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let plain = EmergencyRequest::new(SosService::Sos, id.clone(), "192.0.2.10", 5060)
+            .invite()
+            .unwrap();
+        assert_eq!(plain.headers.get("p-access-network-info"), None);
+        assert_eq!(plain.headers.get("recv-info"), None);
+
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_pani("IEEE-802.11; i-wlan-node-id=001122334455")
+            .with_current_location_discovery()
+            .invite()
+            .unwrap();
+        assert_eq!(
+            req.headers.get("p-access-network-info"),
+            Some("IEEE-802.11; i-wlan-node-id=001122334455")
+        );
+        assert_eq!(
+            req.headers.get("recv-info"),
+            Some("g.3gpp.current-location-discovery")
+        );
+        assert_eq!(
+            req.headers.get("accept"),
+            Some("application/vnd.3gpp.current-location-discovery+xml")
+        );
+    }
+
+    #[test]
+    fn ecall_urns_are_recognised() {
+        assert_eq!(
+            SosService::parse("urn:service:sos.ecall.manual").unwrap(),
+            SosService::EcallManual
+        );
+        assert_eq!(
+            SosService::parse("URN:SERVICE:SOS.ECALL.AUTOMATIC").unwrap(),
+            SosService::EcallAutomatic
+        );
+        assert_eq!(
+            SosService::EcallManual.as_str(),
+            "urn:service:sos.ecall.manual"
         );
     }
 
@@ -503,5 +814,49 @@ mod tests {
         assert_eq!(req.uri, "sip:orig@scscf.example;lr");
         // The URN still identifies the emergency target in To.
         assert!(req.headers.get("to").unwrap().contains("urn:service:sos"));
+    }
+
+    #[test]
+    fn emergency_registration_marks_the_contact_with_the_sos_parameter() {
+        let id = EmergencyIdentity::temporary_from_imsi(
+            "001010000000001",
+            "ims.mnc001.mcc001.3gppnetwork.org",
+        );
+        let reg = EmergencyRegistration::new(id, "192.0.2.10", 5060, 600)
+            .with_pani("IEEE-802.11; i-wlan-node-id=001122334455");
+        let req = reg.register("sip:ims.mnc001.mcc001.3gppnetwork.org", "192.0.2.10", 5060);
+        assert_eq!(req.method, Method::Register);
+        assert_eq!(req.uri, "sip:ims.mnc001.mcc001.3gppnetwork.org");
+        // §5.1.6.2 a: the marker lives in the Contact URI parameter.
+        assert_eq!(
+            req.headers.get("contact"),
+            Some("<sip:001010000000001@192.0.2.10:5060;sos>")
+        );
+        // §5.1.6.2 b: From and To carry the same identity.
+        let from = req.headers.get("from").unwrap();
+        let to = req.headers.get("to").unwrap();
+        assert!(from.contains("sip:001010000000001@ims.mnc001.mcc001.3gppnetwork.org"));
+        assert!(to.contains("sip:001010000000001@ims.mnc001.mcc001.3gppnetwork.org"));
+        assert_eq!(req.headers.get("expires"), Some("600"));
+        assert_eq!(
+            req.headers.get("p-access-network-info"),
+            Some("IEEE-802.11; i-wlan-node-id=001122334455")
+        );
+        assert_eq!(req.headers.get("content-length"), Some("0"));
+        assert!(req.body.is_empty());
+    }
+
+    #[test]
+    fn emergency_registration_is_unauthenticated() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let req = EmergencyRegistration::new(id, "192.0.2.10", 5060, 600).register(
+            "sip:ims.example",
+            "192.0.2.10",
+            5060,
+        );
+        assert_eq!(req.headers.get("authorization"), None);
+        assert_eq!(req.headers.get("proxy-authorization"), None);
+        // And it is not a "Service: sos" registration: that header is not used.
+        assert_eq!(req.headers.get("service"), None);
     }
 }

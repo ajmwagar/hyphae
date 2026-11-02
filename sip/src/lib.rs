@@ -12,6 +12,7 @@
 
 mod headers;
 mod message;
+pub mod multipart;
 mod transaction;
 mod uri;
 
@@ -19,6 +20,7 @@ pub use headers::{
     parse_challenge, split_params, AuthChallenge, CSeq, Header, Headers, NameAddr, Via,
 };
 pub use message::{Message, Method, Request, Response, Version};
+pub use multipart::{multipart_mixed, Part};
 pub use transaction::{
     key_from_message, ClientEvent, ClientTransaction, ClientTransactionState, ServerEvent,
     ServerTransaction, ServerTransactionState, Timer, TransactionKey,
