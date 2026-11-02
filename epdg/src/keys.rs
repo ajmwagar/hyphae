@@ -6,7 +6,11 @@
 //! ```text
 //! SKEYSEED = prf(Ni | Nr, g^ir)
 //! {SK_d | SK_ai | SK_ar | SK_ei | SK_er | SK_pi | SK_pr}
-//!          = prf+(SKEYSEED, Ni | Nr)
+//!          = prf+(SKEYSEED, Ni | Nr | SPIi | SPIr)
+//!
+//! The seed for the expansion includes **both IKE SPIs**, not just the nonces
+//! (RFC 7296 §2.14). Leaving them out is invisible when both ends share the
+//! code, and fatal against anything else.
 //! ```
 //!
 //! `prf+` is the same construction as the RFC 5448 PRF', so this module reuses
@@ -103,11 +107,16 @@ pub fn derive_keys(
     skeyseed: &[u8; 32],
     nonce_i: &[u8],
     nonce_r: &[u8],
+    spi_i: [u8; 8],
+    spi_r: [u8; 8],
     sizes: IkeKeySizes,
 ) -> IkeKeys {
-    let mut seed = Vec::with_capacity(nonce_i.len() + nonce_r.len());
+    // RFC 7296 §2.14: KEYMAT = prf+(SKEYSEED, Ni | Nr | SPIi | SPIr).
+    let mut seed = Vec::with_capacity(nonce_i.len() + nonce_r.len() + 16);
     seed.extend_from_slice(nonce_i);
     seed.extend_from_slice(nonce_r);
+    seed.extend_from_slice(&spi_i);
+    seed.extend_from_slice(&spi_r);
     let material = prf_plus(skeyseed, &seed, sizes.total());
     let mut at = 0;
     let mut take = |len: usize| {
@@ -130,6 +139,22 @@ pub fn derive_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 7296 §2.14 puts **both IKE SPIs** into the prf+ seed. Omitting them
+    /// is undetectable when both ends share the code — which is exactly how it
+    /// survived until an independent peer rejected every IKE_AUTH.
+    #[test]
+    fn the_spis_are_part_of_the_expansion_seed() {
+        let seed = [0x33u8; 32];
+        let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
+        let a = derive_keys(&seed, &[1; 32], &[2; 32], [0xaa; 8], [0xbb; 8], sizes);
+        let b = derive_keys(&seed, &[1; 32], &[2; 32], [0xaa; 8], [0xbc; 8], sizes);
+        let c = derive_keys(&seed, &[1; 32], &[2; 32], [0xab; 8], [0xbb; 8], sizes);
+        assert_ne!(a, b, "the responder SPI must affect the keys");
+        assert_ne!(a, c, "the initiator SPI must affect the keys");
+        assert_ne!(a.sk_d, b.sk_d);
+        assert_ne!(a.sk_pi, c.sk_pi);
+    }
 
     #[test]
     fn prf_plus_is_prefix_stable() {
@@ -157,7 +182,7 @@ mod tests {
     fn derived_keys_have_the_requested_lengths_and_order() {
         let seed = [0x33u8; 32];
         let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
-        let keys = derive_keys(&seed, &[0x01; 32], &[0x02; 32], sizes);
+        let keys = derive_keys(&seed, &[0x01; 32], &[0x02; 32], [0xaa; 8], [0xbb; 8], sizes);
         assert_eq!(keys.sk_d.len(), 32);
         assert_eq!(keys.sk_ai.len(), 32);
         assert_eq!(keys.sk_ar.len(), 32);
@@ -166,8 +191,15 @@ mod tests {
         assert_eq!(keys.sk_pi.len(), 32);
         assert_eq!(keys.sk_pr.len(), 32);
 
-        // The stream is sliced in the RFC order.
-        let seed_input = [&[0x01; 32][..], &[0x02; 32][..]].concat();
+        // The stream is sliced in the RFC order, over the RFC seed
+        // (Ni | Nr | SPIi | SPIr).
+        let seed_input = [
+            &[0x01; 32][..],
+            &[0x02; 32][..],
+            &[0xaa; 8][..],
+            &[0xbb; 8][..],
+        ]
+        .concat();
         let material = prf_plus(&seed, &seed_input, sizes.total());
         assert_eq!(keys.sk_d, material[..32]);
         assert_eq!(keys.sk_ai, material[32..64]);
@@ -181,7 +213,7 @@ mod tests {
     #[test]
     fn aes_256_changes_only_the_encryption_key_length() {
         let sizes = IkeKeySizes::aes_cbc_256_sha256_128();
-        let keys = derive_keys(&[0x33u8; 32], &[1], &[2], sizes);
+        let keys = derive_keys(&[0x33u8; 32], &[1], &[2], [0; 8], [0; 8], sizes);
         assert_eq!(keys.sk_ei.len(), 32);
         assert_eq!(keys.sk_er.len(), 32);
         assert_eq!(keys.sk_d.len(), 32);

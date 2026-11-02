@@ -101,6 +101,9 @@ pub struct UeClient {
     child_spi: [u8; 4],
     iv: [u8; BLOCK_LEN],
     message_id: u32,
+    /// Kept only so the lab can re-derive the shared secret for diagnostics.
+    private_exponent: Vec<u8>,
+    group: u16,
 }
 
 impl UeClient {
@@ -128,6 +131,8 @@ impl UeClient {
             child_spi,
             iv: [0x33; BLOCK_LEN],
             message_id: 1,
+            private_exponent: private_exponent.to_vec(),
+            group,
         })
     }
 
@@ -154,6 +159,8 @@ impl UeClient {
             child_spi,
             iv: [0x33; BLOCK_LEN],
             message_id: 1,
+            private_exponent: private_exponent.to_vec(),
+            group,
         })
     }
 
@@ -166,6 +173,10 @@ impl UeClient {
     pub fn on_sa_init_response(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
         let message = Message::decode(bytes).map_err(|e| ClientError::Decode(e.to_string()))?;
         if std::env::var("EPDG_LAB_DEBUG").is_ok() {
+            eprintln!(
+                "debug: raw_response={}",
+                bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
             let nonce = message
                 .find(PayloadType::Nonce)
                 .map(|p| p.body.clone())
@@ -176,11 +187,54 @@ impl UeClient {
                 nonce.len(),
                 self.nonce_i().len()
             );
+            // Dump everything needed to check the DH agreement independently.
+            if let Some(ke) = message.find(PayloadType::Ke) {
+                let ke = epdg::ikev2::Ke::decode(&ke.body).unwrap();
+                let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+                let ours =
+                    epdg::dh::DhKeyPair::from_private(self.group, &self.private_exponent).unwrap();
+                eprintln!("debug: ke_group={}", ke.dh_group);
+                eprintln!("debug: ke_y={}", hex(&ke.key_data));
+                eprintln!("debug: priv_x={}", hex(&self.private_exponent));
+                eprintln!("debug: our_public={}", hex(&ours.public_bytes()));
+                eprintln!("debug: shared={}", hex(&ours.agree(&ke.key_data).unwrap()));
+                eprintln!("debug: nonce_i_hex={}", hex(&self.nonce_i()));
+                eprintln!("debug: nonce_r_hex={}", hex(&nonce));
+                // What our own key schedule produces, for comparison with an
+                // independent computation of the same inputs.
+                let shared = ours.agree(&ke.key_data).unwrap();
+                let seed = epdg::keys::skeyseed(&self.nonce_i(), &nonce, &shared);
+                eprintln!("debug: our_skeyseed={}", hex(&seed));
+                let keys = epdg::keys::derive_keys(
+                    &seed,
+                    &self.nonce_i(),
+                    &nonce,
+                    self.sa.initiator_spi(),
+                    self.sa.responder_spi().unwrap_or([0; 8]),
+                    epdg::keys::IkeKeySizes::aes_cbc_128_sha256_128(),
+                );
+                eprintln!("debug: our_sk_d={}", hex(&keys.sk_d));
+                eprintln!("debug: our_sk_ai={}", hex(&keys.sk_ai));
+                eprintln!("debug: our_sk_ar={}", hex(&keys.sk_ar));
+                eprintln!("debug: our_sk_ei={}", hex(&keys.sk_ei));
+                eprintln!("debug: our_sk_er={}", hex(&keys.sk_er));
+            }
         }
         // `on_response` needs the Message, and the raw bytes for SignedOctets.
         let keys = self
             .sa
             .on_response(&message, IkeKeySizes::aes_cbc_128_sha256_128())?;
+        if std::env::var("EPDG_LAB_DEBUG").is_ok() {
+            let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+            eprintln!("debug: real_sk_d={}", hex(&keys.sk_d));
+            eprintln!("debug: real_sk_ai={}", hex(&keys.sk_ai));
+            eprintln!("debug: real_sk_ei={}", hex(&keys.sk_ei));
+            eprintln!("debug: spi_i={}", hex(&self.sa.initiator_spi()));
+            eprintln!(
+                "debug: spi_r={}",
+                hex(&self.sa.responder_spi().unwrap_or([0; 8]))
+            );
+        }
 
         let first = self.sa.first_message().encode();
         let auth = IkeAuthInitiator::new(
@@ -199,6 +253,15 @@ impl UeClient {
             self.child_spi,
         );
         let request = auth.first_request(&self.iv)?;
+        if std::env::var("EPDG_LAB_DEBUG").is_ok() {
+            eprintln!(
+                "debug: auth_msg={}",
+                request
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+        }
         self.auth = Some(auth);
         self.message_id += 1;
         Ok(request)

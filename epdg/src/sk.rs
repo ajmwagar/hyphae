@@ -119,14 +119,18 @@ impl Sk {
             .map(|p| p.kind)
             .unwrap_or(PayloadType::None);
         let body_len = BLOCK_LEN + ciphertext.len();
-        let mut out = Vec::with_capacity(HEADER_LEN + 4 + body_len + ICV_LEN);
+        let total = HEADER_LEN + 4 + body_len + ICV_LEN;
+        let mut out = Vec::with_capacity(total);
         let mut sealed = header;
         sealed.next_payload = PayloadType::Encrypted;
-        out.extend_from_slice(&sealed.encode(HEADER_LEN + 4 + body_len + ICV_LEN));
+        out.extend_from_slice(&sealed.encode(total));
         // Outer payload: next = first inner payload, critical 0, length.
+        // The SK payload length covers everything after the generic header,
+        // **including the ICV** (RFC 7296 §3.14). Leaving the ICV out makes a
+        // peer split ciphertext and ICV at the wrong offset, so the MAC fails.
         out.push(first_next as u8);
         out.push(0);
-        out.extend_from_slice(&((4 + body_len) as u16).to_be_bytes());
+        out.extend_from_slice(&((total - HEADER_LEN) as u16).to_be_bytes());
         out.extend_from_slice(iv);
         out.extend_from_slice(&ciphertext);
         let icv = self.icv(&out);
@@ -160,7 +164,7 @@ impl Sk {
         let first_next =
             PayloadType::from_u8(payload[0]).ok_or(IkeError::UnknownPayload(payload[0]))?;
         let plen = u16::from_be_bytes([payload[2], payload[3]]) as usize;
-        if plen != payload.len() {
+        if plen != payload.len() + ICV_LEN {
             return Err(SkError::Ike(IkeError::Malformed(
                 "SK payload length mismatch",
             )));
