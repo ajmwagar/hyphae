@@ -1682,3 +1682,187 @@ fn sec_004_negotiates_sas_and_renders_xfrm_commands() {
         Err(transport::ipsec::IpsecError::PlatformUnsupported)
     );
 }
+
+// --- USIM-002/003: modem card access (QMI UIM, AT+CSIM) -------------------
+
+#[test]
+fn usim_002_qmi_send_apdu_frames_and_reaches_the_card() {
+    use usim::qmi::{decode_qmux, encode_qmux, send_apdu_tlvs, MSG_SEND_APDU, SERVICE_UIM};
+    use usim::{AkaOutput, CardResponse, QmiApdu, QmiExchange, Usim, UsimCard, UsimError};
+
+    // QMUX: 01 | len(2) | 00 | service | client | QMI(flags,txid,msg) | TLVs
+    let tlvs = send_apdu_tlvs(1, 0, &[0x00, 0x88]);
+    let frame = encode_qmux(SERVICE_UIM, 9, 0x0102, MSG_SEND_APDU, &tlvs);
+    assert_eq!(frame[0], 0x01);
+    assert_eq!(&frame[3..6], &[0x00, SERVICE_UIM, 9]);
+    assert_eq!(&frame[7..9], &[0x02, 0x01]); // transaction LE
+    assert_eq!(&frame[9..11], &[0x3B, 0x00]); // message LE
+    let len = u16::from_le_bytes([frame[1], frame[2]]) as usize;
+    assert_eq!(len + 3, frame.len());
+
+    // A fake modem answers Send APDU with a 3G AUTHENTICATE body + 90 00.
+    struct Modem;
+    impl QmiExchange for Modem {
+        fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, UsimError> {
+            let mut apdu = vec![0xDB, 8];
+            apdu.extend_from_slice(&[0xA5; 8]);
+            apdu.push(16);
+            apdu.extend_from_slice(&[0xB4; 16]);
+            apdu.push(16);
+            apdu.extend_from_slice(&[0xF7; 16]);
+            apdu.extend_from_slice(&[0x90, 0x00]);
+            let mut value = (apdu.len() as u16).to_le_bytes().to_vec();
+            value.extend_from_slice(&apdu);
+            let mut qmi = vec![0x00, request[7], request[8], 0x3B, 0x00];
+            for (kind, val) in [(0x02u8, vec![0u8, 0, 0, 0]), (0x10u8, value)] {
+                qmi.push(kind);
+                qmi.extend_from_slice(&(val.len() as u16).to_le_bytes());
+                qmi.extend_from_slice(&val);
+            }
+            let mut out = vec![0x02];
+            out.extend_from_slice(&((3 + qmi.len()) as u16).to_le_bytes());
+            out.extend_from_slice(&[0x00, SERVICE_UIM, request[5]]);
+            out.extend_from_slice(&qmi);
+            Ok(out)
+        }
+    }
+
+    let mut card = UsimCard::new(QmiApdu::new(Modem, 9, 1));
+    match card.authenticate(&[0x11; 16], &[0x22; 16]).unwrap() {
+        AkaOutput::Success { res, .. } => assert_eq!(res, vec![0xA5; 8]),
+        other => panic!("unexpected {other:?}"),
+    }
+    // The response frame decodes back through the same codec.
+    assert!(decode_qmux(&encode_qmux(SERVICE_UIM, 1, 1, MSG_SEND_APDU, &[])).is_ok());
+    let _ = CardResponse::from_apdu_response(&[0x90, 0x00]).unwrap();
+}
+
+#[test]
+fn usim_003_at_csim_round_trips_an_apdu() {
+    use usim::at::{csim_command, parse_csim_response, AtApdu, AtChannel};
+    use usim::{apdu::authenticate_command, ApduChannel, UsimError};
+
+    let apdu = authenticate_command(&[0x11; 16], &[0x22; 16]).to_bytes();
+    let cmd = csim_command(&apdu);
+    assert!(cmd.starts_with("AT+CSIM=80,\"0088"));
+    assert!(cmd.ends_with('"'));
+    assert_eq!(
+        parse_csim_response("+CSIM: 6,\"DB9000\"").unwrap(),
+        vec![0xDB, 0x90, 0x00]
+    );
+
+    struct At;
+    impl AtChannel for At {
+        fn command(&mut self, _c: &str) -> Result<String, UsimError> {
+            Ok("+CSIM: 4,\"9000\"".into())
+        }
+    }
+    let mut channel = AtApdu::new(At);
+    let response = channel.transmit(&apdu).unwrap();
+    assert_eq!((response.sw1, response.sw2), (0x90, 0x00));
+}
+
+// --- AUDIO-001: call-audio plumbing --------------------------------------
+
+#[test]
+fn audio_001_pcm_moves_through_a_ring_buffer_and_a_wav() {
+    use media::audio::{AudioSink, AudioSource, Loopback, Pacing, RingBuffer, Wav};
+    use std::time::{Duration, Instant};
+
+    // Bounded queue: overflow drops the oldest, underrun pads silence.
+    let mut ring = RingBuffer::new(4);
+    ring.push(&[1, 2, 3, 4, 5, 6]);
+    assert_eq!(ring.dropped(), 2);
+    let mut out = [0i16; 6];
+    assert_eq!(ring.pop_into(&mut out), 4);
+    assert_eq!(out, [3, 4, 5, 6, 0, 0]);
+    assert_eq!(ring.underruns(), 1);
+
+    // Connected sink/source pair, as a device adapter would be wired.
+    let (mut sink, mut source) = Loopback::pair(480);
+    sink.write(&[10, 20, 30]).unwrap();
+    let mut pcm = [0i16; 4];
+    assert_eq!(source.read(&mut pcm, Duration::from_millis(10)).unwrap(), 3);
+    assert_eq!(pcm, [10, 20, 30, 0]);
+
+    // Capture sink produces a valid RIFF/WAVE file.
+    let mut wav = Wav::new(16_000, 1);
+    wav.write(&[1, -1]).unwrap();
+    let bytes = wav.to_bytes();
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    assert_eq!(&bytes[36..40], b"data");
+
+    // Playback pacing: 20 ms at 16 kHz is one 320-sample frame.
+    let t0 = Instant::now();
+    let mut pacing = Pacing::new(16_000, t0);
+    assert_eq!(pacing.due(t0), 0);
+    assert_eq!(pacing.due(t0 + Duration::from_millis(20)), 320);
+}
+
+// --- VOICE-001/002: continuity -------------------------------------------
+
+#[test]
+fn voice_001_invite_failures_classify_to_continuity_events() {
+    use ims::{classify_invite_failure, FallbackReason};
+
+    let response = |status: u16, retry: Option<&str>| {
+        let mut headers = sip::Headers::new();
+        if let Some(r) = retry {
+            headers.push(sip::Header::new("Retry-After", r));
+        }
+        sip::Response {
+            status,
+            reason: " ".into(),
+            headers,
+            body: Vec::new(),
+        }
+    };
+
+    // The network cannot serve VoLTE: fall back to CS (TS 23.216).
+    assert_eq!(
+        classify_invite_failure(&response(488, None)),
+        Some(FallbackReason::EpsFallback)
+    );
+    assert_eq!(
+        classify_invite_failure(&response(580, None)),
+        Some(FallbackReason::EpsFallback)
+    );
+    // 503 is a retry hint, not a fallback.
+    assert_eq!(
+        classify_invite_failure(&response(503, Some("30"))),
+        Some(FallbackReason::ServiceNotProvided {
+            retry_after_s: Some(30)
+        })
+    );
+    // Ordinary rejections are not continuity events.
+    assert_eq!(classify_invite_failure(&response(486, None)), None);
+}
+
+#[test]
+fn voice_002_media_liveness_degrades_then_is_lost() {
+    use ims::{ContinuityEvent, ContinuityMonitor};
+    use std::time::{Duration, Instant};
+
+    let t0 = Instant::now();
+    let mut monitor = ContinuityMonitor::new(Duration::from_secs(6));
+    monitor.start(t0);
+    assert_eq!(
+        monitor.poll(t0 + Duration::from_secs(1)),
+        ContinuityEvent::Healthy
+    );
+    assert_eq!(
+        monitor.poll(t0 + Duration::from_secs(3)),
+        ContinuityEvent::Degraded
+    );
+    assert_eq!(
+        monitor.poll(t0 + Duration::from_secs(6)),
+        ContinuityEvent::Lost
+    );
+    // A late packet revives the session.
+    monitor.on_activity(t0 + Duration::from_secs(6));
+    assert_eq!(
+        monitor.poll(t0 + Duration::from_secs(6)),
+        ContinuityEvent::Healthy
+    );
+}

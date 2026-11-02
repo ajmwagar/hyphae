@@ -14,6 +14,8 @@ translated, or reconstructed from a vendor binary.
 | IMS / 3GPP | TS 23.003 (identities, APN, IMS domain), TS 23.228 (IMS architecture), TS 24.229 (SIP/IMS call control), TS 24.604 (communication diversion/call waiting), TS 26.114 (MTSI media), TS 26.445 (EVS codec and RTP payload), TS 31.102 (USIM AUTHENTICATE), TS 33.102 (3G security), TS 33.203 (IMS security/AKA), TS 35.205/35.206 (Milenage), TS 35.208 (Milenage test data), TS 24.011 (RP layer), TS 24.341 (SMS over IMS), TS 24.301 (EPS NAS/PCO) |
 | GSMA | IR.92 (VoLTE/MMTel), IR.94 (video share/IR.92 extension) |
 | Codec | RFC 6716 (Opus), RFC 4867 (AMR/AMR-WB RTP), FIPS-197 (AES) |
+| Voice continuity | 3GPP TS 23.216 (EPS fallback, SRVCC); TS 24.229 §5.1.3 |
+| Card access | 3GPP TS 27.007 `+CSIM`; libqmi UIM `Send APDU` (service 0x0B, message 0x3B) |
 
 Public copies are available from the IETF Datatracker, 3GPP FTP, and GSMA.
 Citations in code and fixtures point at the clause, not a vendor manual.

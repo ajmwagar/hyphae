@@ -133,7 +133,42 @@ directly (TS 33.203 §7, RFC 3329).
 The modem is not involved: it only provides the IP bearer. SAs bind to that
 PDN interface and its addresses.
 
-## 6. ARM-first targets
+## 6. Voice continuity and the audio seam
+
+Two integration seams matter more than any remaining protocol work, and both are
+pure Rust with the device side out of tree.
+
+**Continuity** (`ims::continuity`). EPS fallback and SRVCC are radio decisions
+the AP cannot take. The client classifies and reports:
+
+* a final INVITE of `488`/`580` means the network cannot serve the session over
+  IMS → `FallbackReason::EpsFallback` (TS 23.216), and `503` + `Retry-After`
+  is a retry hint;
+* a `ContinuityMonitor` fed every RTP/RTCP packet reports `Degraded` at half the
+  timeout and `Lost` at the timeout, which is the SRVCC eligibility signal.
+
+The platform (telephony daemon + radio) decides whether to use CS.
+
+**Call audio** (`media::audio`). The codec side already produces 16-bit mono PCM
+frames. This module is the seam:
+
+```text
+  codec/evs/codec-amr ── PCM ──► RingBuffer ──► AudioSink ──► device
+                                      ▲                        (ALSA adapter,
+  AudioSource ◄── PCM ────────────────┘                         out of tree)
+```
+
+* `AudioSink`/`AudioSource` are the device traits; an ALSA/PulseAudio adapter
+  implements them out of tree, so the default build links no audio library and
+  stays `#![forbid(unsafe_code)]`.
+* `RingBuffer` accounts for drops and underruns, `Loopback` connects a pair for
+  tests, `Wav` captures a call to a 16-bit PCM file, and `Pacing` releases
+  samples at the frame rate.
+
+On modem-side IMS the AP never touches call audio; this seam exists for the
+AP-side path, where the modem's voice PCM has to reach userspace.
+
+## 7. ARM-first targets
 
 First devices are 32-bit ARM (TCL 4058G, armv7l) and 64-bit ARM (CAT S22
 msm8937 hardware, mainline aarch64). Therefore:

@@ -36,12 +36,15 @@ normative clause and the executable test that proves it.
 | Registration, IMS-AKA, USIM (`REG-*`, `AKA-*`, `USIM-001`) | implemented |
 | Mobile-originated and mobile-terminated calls, CANCEL, PRACK, BYE (`INV-*`, `UAS-*`) | implemented |
 | Hold/resume, call waiting, re-INVITE/UPDATE renegotiation (`SUP-*`) | implemented |
+| Voice continuity: EPS fallback classification, media-liveness monitor (`VOICE-*`) | implemented |
 | Forked INVITE, OPTIONS keepalive (`INV-004`, `KEEP-001`) | implemented |
 | SMS over IMS, both directions (`SMS-*`) | implemented |
 | Gm IPsec: authenticated ESP, SA negotiation, Linux XFRM (`SEC-002..004`) | implemented |
 | Media framing: RTP/RTCP, jitter buffer, PLC (`MEDIA-001`) | implemented |
+| Call-audio seam: ring buffer, loopback, WAV capture, pacing (`AUDIO-001`) | implemented; device adapter out of tree |
 | Payload formats: RFC 4867 AMR-WB, TS 26.445 EVS (`RTP-*`, `EVS-001`) | implemented |
 | Modem backends: AT/QMI, MBIM, CCCI boundary (`TRN-*`) | modelled / boundary |
+| USIM access: software, PC/SC boundary, QMI UIM Send APDU, AT+CSIM (`USIM-*`) | implemented |
 | Emergency (E911) request construction (`E911-001`) | implemented, never transmitted |
 | Byte-level modem I/O, live emergency calling | out of tree / product gate |
 
@@ -74,13 +77,13 @@ byte I/O is the only modem-specific piece left.
 | --- | --- |
 | `sip` | RFC 3261 messages, headers, client/server transactions; no I/O |
 | `aka` | Milenage f1–f5, AUTN verification, RFC 3310 RES; pure functions |
-| `usim` | TS 31.102 `AUTHENTICATE` APDU, card boundary, software USIM |
-| `ims` | profile, REGISTER/401/407, SDP, dialogs, MO/MT calls, SMS, E911 |
+| `usim` | TS 31.102 `AUTHENTICATE`, card boundary, QMI UIM / AT+CSIM adapters, software USIM |
+| `ims` | profile, REGISTER/401/407, SDP, dialogs, MO/MT calls, SMS, E911, continuity |
 | `carrier` | TOML profiles keyed by MCC/MNC, plus lab profile `00101` |
 | `codec` | `Codec` trait and optional Opus (feature `opus`); PCM only |
 | `codec-amr` | RFC 4867 payload format and optional AMR-WB FFI (separate package) |
 | `evs` | TS 26.445 appendix A EVS payload format; no codec |
-| `media` | RFC 3550 RTP/RTCP, jitter buffer and PLC |
+| `media` | RFC 3550 RTP/RTCP, jitter buffer, PLC, call-audio seam |
 | `transport` | mock, UDP/TCP, ESP/IPsec, AT/QMI + MBIM PDN, CCCI boundary |
 | `tests/conformance` | spec-derived conformance harness with cited clauses |
 | `lab` | Open5GS + Kamailio IMS plan, plus a runnable local P-CSCF |

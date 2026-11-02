@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod amr_rtp;
+pub mod audio;
 pub mod jitter;
 pub mod packet;
 pub mod plc;
