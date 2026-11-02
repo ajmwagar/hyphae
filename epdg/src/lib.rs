@@ -22,8 +22,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dh;
 pub mod eap;
 pub mod ikev2;
+pub mod keys;
 
 pub use eap::{AkaPrimePeer, EapPacket, EapPeerError};
 pub use ikev2::{ExchangeType, Header, IkeError, Message, Payload, PayloadType};
+pub use keys::{derive_keys, prf_plus, skeyseed, IkeKeySizes, IkeKeys};
