@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod aes;
+pub mod eap_aka_prime;
 
 pub use aes::encrypt_block;
 

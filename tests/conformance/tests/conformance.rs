@@ -1866,3 +1866,57 @@ fn voice_002_media_liveness_degrades_then_is_lost() {
         ContinuityEvent::Healthy
     );
 }
+
+// --- EPDG-001: EAP-AKA' key hierarchy (Wi-Fi calling core) ----------------
+
+#[test]
+fn epdg_001_eap_aka_prime_derives_the_full_key_set() {
+    use aka::eap_aka_prime::{
+        at_mac, bidding_attribute, ck_ik_prime, derive_keys, kdf_attribute, kdf_input_attribute,
+        parse_attributes, prf_prime, separation_bit_set, AT_BIDDING, AT_KDF, AT_KDF_INPUT,
+    };
+
+    // 3GPP TS 33.402: CK'/IK' are bound to the access-network name.
+    let ck = [0x11u8; 16];
+    let ik = [0x22u8; 16];
+    let (ck_p, _ik_p) = ck_ik_prime(&ck, &ik, "WLAN").unwrap();
+    let (ck_q, _) = ck_ik_prime(&ck, &ik, "OTHER").unwrap();
+    assert_ne!(ck_p, ck_q, "the network name must bind the keys");
+
+    // RFC 5448 §3.3: PRF' expands IK'|CK' into the EAP key set.
+    assert!(separation_bit_set(&[0x80, 0x00]));
+    let keys = derive_keys(&ck, &ik, "WLAN", "user@example", &[0x80, 0x00]).unwrap();
+    assert_eq!(keys.msk.len(), 64);
+    assert_eq!(keys.emsk.len(), 64);
+    // A clear AMF separation bit is not an EAP-AKA' challenge.
+    assert!(derive_keys(&ck, &ik, "WLAN", "user@example", &[0x00, 0x00]).is_err());
+
+    // PRF' is prefix-stable: asking for more output extends the same stream.
+    let prf_key = [0x33u8; 32];
+    let short = prf_prime(&prf_key, b"seed", 32);
+    let long = prf_prime(&prf_key, b"seed", 208);
+    assert_eq!(&long[..32], &short[..]);
+
+    // Attributes: length-prefixed network name, KDF selector, bidding bit.
+    let attrs = [
+        kdf_input_attribute("WLAN").unwrap(),
+        kdf_attribute(1),
+        bidding_attribute(true),
+    ]
+    .concat();
+    assert_eq!(attrs.len() % 4, 0);
+    let parsed = parse_attributes(&attrs).unwrap();
+    assert_eq!(parsed[0].0, 0x80 | AT_KDF_INPUT);
+    assert_eq!(parsed[1].0, 0x80 | AT_KDF);
+    assert_eq!(parsed[2].0, AT_BIDDING);
+    assert_eq!(parsed[2].1[0] & 0x80, 0x80);
+
+    // AT_MAC is HMAC-SHA-256-128 over the packet with the MAC field zeroed.
+    let mut packet = vec![0x8b, 0x05];
+    packet.extend_from_slice(&[0xaa; 16]);
+    let mac = at_mac(&keys.k_aut, &packet, 2).unwrap();
+    let mut zeroed = packet.clone();
+    zeroed[2..18].fill(0);
+    assert_eq!(mac, at_mac(&keys.k_aut, &zeroed, 2).unwrap());
+    assert_eq!(mac.len(), 16);
+}
