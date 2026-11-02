@@ -35,6 +35,7 @@ pub mod eap;
 pub mod ike_auth;
 pub mod ikev2;
 pub mod keys;
+pub mod natt;
 pub mod sa;
 pub mod sk;
 
@@ -51,5 +52,6 @@ pub use eap::{AkaPrimePeer, EapPacket, EapPeerError};
 pub use ike_auth::{AuthError, AuthStep, IkeAuthInitiator};
 pub use ikev2::{ExchangeType, Header, IkeError, Message, Payload, PayloadType};
 pub use keys::{derive_keys, prf_plus, skeyseed, IkeKeySizes, IkeKeys};
+pub use natt::{NatDetector, NatVerdict};
 pub use sa::{sa_init_response, SaError, SaInitInitiator};
 pub use sk::{Sk, SkError};
