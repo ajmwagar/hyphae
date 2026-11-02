@@ -10,6 +10,7 @@ members = [
     "evs",
     "media",
     "transport",
+    "usim",
     "cli",
     "tests/conformance",
 ]
@@ -30,3 +31,4 @@ codec-amr = { path = "codec-amr" }
 evs = { path = "evs" }
 media = { path = "media" }
 transport = { path = "transport" }
+usim = { path = "usim" }

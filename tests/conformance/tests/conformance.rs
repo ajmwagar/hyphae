@@ -968,3 +968,82 @@ fn e911_001_geolocation_is_routed_as_pidf_lo() {
         Some(request.body.len().to_string().as_str())
     );
 }
+
+// --- USIM-001: TS 31.102 AUTHENTICATE over the card boundary --------------
+
+#[test]
+fn usim_001_authenticate_apdu_matches_ts_31_102() {
+    use usim::{authenticate_command, sw, ApduChannel, CardResponse, Usim, UsimCard, UsimError};
+
+    // Command layout: CLA=00 INS=88 P1=00 P2=01 Lc=22, data = 10 RAND 10 AUTN.
+    let rand = [0x11u8; 16];
+    let autn = [0x22u8; 16];
+    let bytes = authenticate_command(&rand, &autn).to_bytes();
+    assert_eq!(&bytes[..5], &[0x00, 0x88, 0x00, 0x01, 0x22]);
+    assert_eq!(bytes[5], 0x10);
+    assert_eq!(&bytes[6..22], &rand);
+    assert_eq!(bytes[22], 0x10);
+    assert_eq!(&bytes[23..39], &autn);
+    assert_eq!(bytes[39], 0x00);
+
+    // A card that returns a 98 62 status must surface as a status-word error.
+    struct Reject;
+    impl ApduChannel for Reject {
+        fn transmit(&mut self, _c: &[u8]) -> Result<CardResponse, UsimError> {
+            Ok(CardResponse::status(
+                sw::AUTH_MAC_FAILURE.0,
+                sw::AUTH_MAC_FAILURE.1,
+            ))
+        }
+    }
+    let mut card = UsimCard::new(Reject);
+    assert_eq!(
+        card.authenticate(&rand, &autn).unwrap_err(),
+        UsimError::StatusWord {
+            sw1: 0x98,
+            sw2: 0x62
+        }
+    );
+}
+
+#[test]
+fn usim_001_software_usim_returns_the_ts_35_208_vector() {
+    use usim::{AkaOutput, LoopbackChannel, SoftwareUsim, Usim, UsimCard};
+
+    // 3GPP TS 35.208 test set 1 (public vector).
+    let k = aka::parse_hex16("465b5ce8b199b49faa5f0a2ee238a6bc").unwrap();
+    let op = aka::parse_hex16("cdc202d5123e20f62b6d676ac72cb318").unwrap();
+    let rand = aka::parse_hex16("23553cbe9637a89d218ae64dae47bf35").unwrap();
+    let sqn = [0xff, 0x9b, 0xb4, 0xd0, 0xb6, 0x07];
+    let amf = [0xb9, 0xb9];
+
+    // Build the AUTN the network would send: (SQN xor AK) || AMF || MAC-A.
+    let m = aka::Milenage::new(k, op);
+    let ak = m.f2345(&rand).3;
+    let mut autn = [0u8; 16];
+    for i in 0..6 {
+        autn[i] = sqn[i] ^ ak[i];
+    }
+    autn[6..8].copy_from_slice(&amf);
+    autn[8..].copy_from_slice(&m.compute(&rand, &sqn, &amf).mac_a);
+
+    // The full path: ME builds the APDU, the channel carries it, the card
+    // (Milenage) answers, and the ME decodes RES/CK/IK.
+    let mut card = UsimCard::new(LoopbackChannel::new(SoftwareUsim::new(k, op, sqn)));
+    match card.authenticate(&rand, &autn).unwrap() {
+        AkaOutput::Success { res, ck, ik } => {
+            assert_eq!(res, vec![0xa5, 0x42, 0x11, 0xd5, 0xe3, 0xba, 0x50, 0xbf]);
+            assert_eq!(ck[0], 0xb4);
+            assert_eq!(ik[0], 0xf7);
+            // RFC 3310: the IMS digest response is RES as uppercase hex.
+            assert_eq!(aka::ims_aka_response(&res), "A54211D5E3BA50BF");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    // The command seen on the wire was the spec APDU.
+    assert_eq!(card.channel().seen.len(), 1);
+    assert_eq!(
+        &card.channel().seen[0][..5],
+        &[0x00, 0x88, 0x00, 0x01, 0x22]
+    );
+}
