@@ -197,7 +197,7 @@ impl Dialog {
 }
 
 /// Extract the `tag` parameter from a `From`/`To` header value.
-fn extract_tag(header: &str) -> Option<String> {
+pub(crate) fn extract_tag(header: &str) -> Option<String> {
     for part in sip::split_params(header) {
         if let Some((key, value)) = part.split_once('=') {
             if key.trim().eq_ignore_ascii_case("tag") {
