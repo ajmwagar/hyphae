@@ -40,7 +40,8 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | E911-001 | Emergency session identity and call routing | 3GPP TS 24.229 §5.1.6; local regulation | **TODO** (product gate) | ims |
 | MEDIA-001 | RTP/RTCP framing, jitter buffer, PLC | RFC 3550; RFC 4867 §9 | `media_001_rtp_amr_frame_round_trips_the_wire`, `media_001_rtcp_sender_report_survives_the_wire`, `media_001_jitter_buffer_reorders_and_flags_loss`, `media_001_plc_conceals_a_lost_frame` | media |
 | TRN-001 | AT/QMI transport on a modem-managed IMS PDN | 3GPP TS 27.007; QMI IMS | `local_addr_is_the_modem_pdn_address`, `delivers_over_the_pdn_loopback` | transport |
-| TRN-002 | MTK CCCI backend | Vendor channel; no vendor code may enter the tree | **TODO** (phase 5) | transport |
+| TRN-002 | MTK CCCI vendor-channel shim: SIP survives a length-framed vendor channel; the `/dev/ccci_*` adapter is a pluggable, out-of-tree `VendorChannel` | Vendor channel; no vendor code may enter the tree | `trn_002_sip_survives_the_ccci_channel_boundary` | transport |
+| TRN-003 | MBIM transport: control-frame wire shape and an IMS PDN session whose local address is the modem-assigned one | USB-IF MBIM 1.0 §8.2.1, §9.4; libmbim | `trn_003_mbim_frame_and_session_round_trip` | transport |
 
 ## Notes on scope
 
@@ -57,8 +58,12 @@ module. "TODO" rows are deliberately not claimed as implemented.
   `TRN-001` (modem IMS PDN, `transport::modem`) cover the *contract* and wire
   shape — RFC 4303 frame round-trip and modem-assigned PDN addressing — but the
   IKEv2 SA/key derivation and the AT/QMI byte-level I/O remain documented stubs
-  pending a kernel SA and a modem device. `E911-001` (product gate) and
-  `TRN-002` (vendor channel) are not yet claimed. `EVS-001` is implemented as
+  pending a kernel SA and a modem device. `TRN-003` (MBIM, `transport::mbim`)
+  models the control-frame wire shape and the modem-assigned IMS PDN session;
+  `TRN-002` (CCCI, `transport::ccci`) ships only the vendor *boundary* — a
+  `VendorChannel` trait plus this tree's own length framing — because CCCI is a
+  vendor interface with no public spec, so no vendor header or device code can
+  enter the tree. `E911-001` (product gate) remains unclaimed. `EVS-001` is implemented as
   the TS 26.445 appendix A *Header-Full* RTP payload format only (no speech
   codec); see the media-path note below.
 * **Media path.** The `media` crate frames RTP/RTCP and buffers playout. It

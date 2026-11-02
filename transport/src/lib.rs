@@ -9,9 +9,10 @@
 //!         │  sip::Message
 //!         ▼
 //!   Transport trait ── MockTransport      (tests, no modem)
-//!                   ── UDP/TCP adapter    (std::net, later)
+//!                   ── UDP/TCP adapter    (std::net)
 //!                   ── AT/QMI adapter     (modem-managed IMS PDN)
-//!                   ── MTK CCCI adapter   (later; vendor channel, spec-free shim)
+//!                   ── MBIM adapter       (USB MBIM IMS PDN session)
+//!                   ── MTK CCCI adapter   (vendor channel shim; no vendor code)
 //! ```
 //!
 //! This crate is std-only and synchronous on purpose. Async runtimes are a
@@ -19,7 +20,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ccci;
 pub mod esp;
+pub mod mbim;
 pub mod modem;
 pub mod net;
 

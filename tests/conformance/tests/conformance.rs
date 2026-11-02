@@ -831,3 +831,70 @@ fn media_001_plc_conceals_a_lost_frame() {
     assert_eq!(concealed[0], 50);
     assert_eq!(plc.fade_frames(), 1);
 }
+
+// --- TRN-002: MTK CCCI vendor-channel shim --------------------------------
+
+#[test]
+fn trn_002_sip_survives_the_ccci_channel_boundary() {
+    use std::time::Duration;
+    use transport::ccci::{frame, parse_frame, CcciTransport, MockCcciChannel};
+
+    // The private length framing round-trips a SIP payload unchanged.
+    let framed = frame(b"sip-payload").unwrap();
+    assert_eq!(&framed[..2], &[0x00, 0x0b]);
+    assert_eq!(parse_frame(&framed).unwrap().0, b"sip-payload");
+
+    // And a real SIP message survives the vendor-channel boundary intact.
+    let (ca, cb) = MockCcciChannel::pair();
+    let mut a = CcciTransport::new("0", ca);
+    let mut b = CcciTransport::new("1", cb);
+    assert_eq!(a.local_addr(), "ccci:0");
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("Via", "SIP/2.0/UDP x;branch=z9hG4bK-ccci"));
+    headers.push(sip::Header::new("CSeq", "1 REGISTER"));
+    headers.push(sip::Header::new("Content-Length", "0"));
+    let sent = sip::Message::Request(sip::Request {
+        method: sip::Method::Register,
+        uri: "sip:ims.example".into(),
+        headers,
+        body: Vec::new(),
+    });
+    a.send(&sent).unwrap();
+    assert_eq!(b.recv(Duration::from_millis(100)).unwrap().unwrap(), sent);
+}
+
+// --- TRN-003: MBIM transport ----------------------------------------------
+
+#[test]
+fn trn_003_mbim_frame_and_session_round_trip() {
+    use std::time::Duration;
+    use transport::mbim::{MbimFrame, MbimMessageType, MbimSession, MbimTransport};
+
+    // The MBIM control frame keeps its 12-octet header shape on the wire.
+    let frame = MbimFrame::new(MbimMessageType::Command, 0xABCD_1234, vec![0x01, 0x02]);
+    let bytes = frame.to_bytes();
+    assert_eq!(bytes.len(), 12 + 2);
+    assert_eq!(&bytes[..4], &3u32.to_le_bytes()); // MessageType = COMMAND
+    assert_eq!(MbimFrame::parse(&bytes).unwrap(), frame);
+
+    // A session is activated on the IMS APN and hands back the modem address.
+    let session = MbimSession::activate("ims");
+    assert_eq!(session.apn, "ims");
+    assert!(session.active);
+    let (mut a, mut b) = MbimTransport::pair("ims", "ims");
+    assert_eq!(a.local_addr(), session.address());
+
+    // SIP rides the MBIM IMS PDN unchanged.
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("Via", "SIP/2.0/UDP x;branch=z9hG4bK-mbim"));
+    headers.push(sip::Header::new("CSeq", "1 REGISTER"));
+    headers.push(sip::Header::new("Content-Length", "0"));
+    let sent = sip::Message::Request(sip::Request {
+        method: sip::Method::Register,
+        uri: "sip:ims.example".into(),
+        headers,
+        body: Vec::new(),
+    });
+    a.send(&sent).unwrap();
+    assert_eq!(b.recv(Duration::from_millis(100)).unwrap().unwrap(), sent);
+}
