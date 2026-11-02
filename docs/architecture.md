@@ -176,8 +176,10 @@ framing and `AT_MAC`. The `epdg` crate adds the IKEv2 message/payload codec and
 an EAP-AKA' peer that verifies the server MAC and answers with `AT_RES`. `epdg::dh` adds the RFC 3526 MODP groups, `epdg::keys` the `SKEYSEED`/`prf+`
 schedule, `epdg::sk` the AES-CBC + HMAC-SHA-256-128 encrypted payload, and
 `epdg::sa` the IKE_SA_INIT initiator (both sides derive the same keys in the
-conformance test). Not implemented yet: the IKE_AUTH state machine and the S2b
-bearer.
+conformance test), and `epdg::ike_auth` the EAP-only IKE_AUTH exchange
+(RFC 5998): encrypted `IDi/SAi2/TSi/TSr`, EAP-AKA' round trips inside SK, then
+`AUTH` computed over the EAP MSK with per-direction SignedOctets. Not
+implemented yet: installing the child SA in the kernel and the S2b bearer.
 
 ## 7. ARM-first targets
 

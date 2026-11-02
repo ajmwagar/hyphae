@@ -2222,3 +2222,178 @@ fn epdg_007_ike_sa_init_derives_matching_keys() {
     let responder_keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], sizes);
     assert_eq!(initiator_keys, responder_keys);
 }
+
+// --- EPDG-008: AUTH payloads and child key material -----------------------
+
+#[test]
+fn epdg_008_auth_payload_and_child_keymat() {
+    use epdg::auth::{
+        auth_payload, child_keymat, signed_octets_initiator, signed_octets_responder,
+    };
+
+    let msk = [0x11u8; 64];
+    let signed = signed_octets_initiator(b"msg1", &[0x22; 32], &[0x33; 32], b"id-i");
+    // AUTH = prf(prf(secret, "Key Pad for IKEv2"), SignedOctets).
+    let auth = auth_payload(&msk, &signed);
+    assert_eq!(auth.len(), 32);
+    assert_eq!(auth, auth_payload(&msk, &signed));
+    assert_ne!(auth, auth_payload(&msk, b"other octets"));
+
+    // The responder's signed octets are a different construction.
+    let r = signed_octets_responder(b"msg2", &[0x22; 32], &[0x33; 32], b"id-r");
+    assert_ne!(signed, r);
+
+    // Child SA key material is prf+(SK_d, Ni | Nr).
+    let sk_d = [0x44u8; 32];
+    let a = child_keymat(&sk_d, &[1], &[2], 64);
+    let b = child_keymat(&sk_d, &[1], &[2], 128);
+    assert_eq!(a.len(), 64);
+    assert_eq!(&b[..64], &a[..]);
+    assert_ne!(a, child_keymat(&sk_d, &[1], &[3], 64));
+}
+
+// --- EPDG-009: IKE_AUTH with EAP-AKA' (RFC 5998) --------------------------
+
+#[test]
+fn epdg_009_ike_auth_eap_flow_establishes() {
+    use aka::eap_aka_prime::{
+        at_mac, attribute, ck_ik_prime, derive_keys as eap_keys, kdf_input_attribute, AT_MAC_LEN,
+    };
+    use epdg::auth::{auth_payload, child_keymat, signed_octets_responder};
+    use epdg::eap::{
+        attribute_value_offset, AkaPrimePeer, EapPacket, AT_MAC, EAP_REQUEST, EAP_SUCCESS,
+        EAP_TYPE_AKA_PRIME, SUBTYPE_CHALLENGE,
+    };
+    use epdg::ike_auth::{AuthStep, IkeAuthInitiator};
+    use epdg::ikev2::{
+        ExchangeType, Header, Id, Payload, PayloadType, FLAG_RESPONSE, ID_RFC822_ADDR,
+    };
+    use epdg::keys::{derive_keys, skeyseed, IkeKeySizes};
+    use epdg::sk::{Sk, BLOCK_LEN};
+
+    let network = "WLAN";
+    let identity = "user@example";
+    let res = [0xA5u8; 8];
+    let iv = [0x55u8; BLOCK_LEN];
+
+    // EAP-AKA' keys for this access network, and the IKE SA keys.
+    let (ck, ik) = ck_ik_prime(&[0x11; 16], &[0x22; 16], network).unwrap();
+    let eap = eap_keys(&ck, &ik, network, identity, &[0x80, 0x00]).unwrap();
+    let seed = skeyseed(&[0x33; 32], &[0x66; 32], &[0x77; 256]);
+    let keys = derive_keys(
+        &seed,
+        &[0x33; 32],
+        &[0x66; 32],
+        IkeKeySizes::aes_cbc_128_sha256_128(),
+    );
+
+    let sk_out = Sk::aes_cbc_128_sha256_128(&keys.sk_ei, &keys.sk_ai).unwrap();
+    let sk_in = Sk::aes_cbc_128_sha256_128(&keys.sk_er, &keys.sk_ar).unwrap();
+
+    let responder = |message_id: u32, payloads: Vec<Payload>| {
+        let header = Header {
+            initiator_spi: [0x01; 8],
+            responder_spi: [0x02; 8],
+            next_payload: PayloadType::Encrypted,
+            exchange: ExchangeType::IkeAuth,
+            flags: FLAG_RESPONSE,
+            message_id,
+        };
+        sk_in.seal(header, &payloads, &iv)
+    };
+
+    let mut auth = IkeAuthInitiator::new(
+        keys.clone(),
+        [0x01; 8],
+        [0x02; 8],
+        vec![0x33; 32],
+        vec![0x66; 32],
+        b"real-message-1".to_vec(),
+        b"real-message-2".to_vec(),
+        identity,
+        [0xDE, 0xAD, 0xBE, 0xEF],
+    );
+    let mut peer = AkaPrimePeer::new(network, eap.clone(), res.to_vec());
+
+    // 1. SK{ IDi, SAi2, TSi, TSr, N(EAP_ONLY) } — encrypted, identity hidden.
+    let first = auth.first_request(&iv).unwrap();
+    assert!(!first.windows(4).any(|w| w == b"user"));
+    let opened = sk_out.open(&first).unwrap();
+    assert_eq!(opened.payloads[0].kind, PayloadType::Idi);
+
+    // 2. Responder sends the AKA' challenge.
+    let mut attributes = kdf_input_attribute(network).unwrap();
+    attributes.extend_from_slice(&attribute(0x80 | AT_MAC, &[0u8; AT_MAC_LEN]));
+    let mut challenge =
+        EapPacket::response(7, EAP_TYPE_AKA_PRIME, Some(SUBTYPE_CHALLENGE), &attributes);
+    challenge[0] = EAP_REQUEST;
+    let mac_at = 4 + 2 + attribute_value_offset(&attributes, AT_MAC).unwrap();
+    let mac = at_mac(&eap.k_aut, &challenge, mac_at).unwrap();
+    challenge[mac_at..mac_at + AT_MAC_LEN].copy_from_slice(&mac);
+
+    let msg = responder(
+        1,
+        vec![Payload {
+            kind: PayloadType::Eap,
+            critical: false,
+            body: challenge,
+        }],
+    );
+    let AuthStep::Send(response) = auth.on_response(&msg, &iv, &mut peer).unwrap() else {
+        panic!("expected an EAP response");
+    };
+    let opened = sk_out.open(&response).unwrap();
+    assert_eq!(
+        EapPacket::parse(&opened.payloads[0].body).unwrap().code,
+        2 // EAP-Response
+    );
+
+    // 3. Responder sends EAP Success; we answer with AUTH.
+    let msg = responder(
+        2,
+        vec![Payload {
+            kind: PayloadType::Eap,
+            critical: false,
+            body: vec![EAP_SUCCESS, 7, 0, 4],
+        }],
+    );
+    let AuthStep::Send(our_auth_msg) = auth.on_response(&msg, &iv, &mut peer).unwrap() else {
+        panic!("expected AUTH");
+    };
+    let opened = sk_out.open(&our_auth_msg).unwrap();
+    assert_eq!(opened.payloads[0].kind, PayloadType::Auth);
+
+    // 4. Responder sends IDr + AUTH + SAr2; the AUTH uses the EAP MSK.
+    let idr = Id {
+        id_type: ID_RFC822_ADDR,
+        data: b"epdg.example".to_vec(),
+    }
+    .encode();
+    let signed = signed_octets_responder(b"real-message-2", &[0x33; 32], &keys.sk_pr, &idr);
+    let responder_auth = auth_payload(&peer.keys().msk, &signed);
+    let msg = responder(
+        3,
+        vec![
+            Payload {
+                kind: PayloadType::Idr,
+                critical: false,
+                body: idr,
+            },
+            Payload {
+                kind: PayloadType::Auth,
+                critical: false,
+                body: responder_auth,
+            },
+        ],
+    );
+    let AuthStep::Established { child_keys } = auth.on_response(&msg, &iv, &mut peer).unwrap()
+    else {
+        panic!("expected Established");
+    };
+    assert_eq!(child_keys.len(), 64);
+    assert_eq!(
+        child_keys,
+        child_keymat(&keys.sk_d, &[0x33; 32], &[0x66; 32], 64)
+    );
+    assert!(auth.is_established());
+}
