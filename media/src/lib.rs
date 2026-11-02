@@ -48,6 +48,13 @@ pub const AMR_WB_FRAME_MS: u64 = 20;
 /// Default dynamic payload type for AMR-WB in an SDP offer (`a=rtpmap:97`).
 pub const AMR_WB_PAYLOAD_TYPE: u8 = 97;
 
+/// VoIP is 8 kHz for AMR-NB; 20 ms is 160 samples.
+pub const AMR_NB_CLOCK_RATE: u32 = 8_000;
+/// Samples per 20 ms AMR-NB frame.
+pub const AMR_NB_FRAME_SAMPLES: usize = 160;
+/// Default dynamic payload type for AMR-NB, below the AMR-WB one.
+pub const AMR_NB_PAYLOAD_TYPE: u8 = 96;
+
 /// RTCP sender-report packet type. RFC 3550 §6.1.
 pub const RTCP_SR: u8 = 200;
 /// RTCP receiver-report packet type. RFC 3550 §6.2.

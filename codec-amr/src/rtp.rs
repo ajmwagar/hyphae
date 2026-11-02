@@ -26,15 +26,133 @@
 
 /// RTP clock rate for AMR-WB.
 pub const CLOCK_RATE: u32 = 16_000;
+/// RTP clock rate for AMR-NB (8 kHz).
+pub const CLOCK_RATE_NB: u32 = 8_000;
+/// Samples per 20 ms AMR-NB frame.
+pub const FRAME_SAMPLES_NB: usize = 160;
 /// Samples per 20 ms AMR-WB frame.
 pub const FRAME_SAMPLES: usize = 320;
+
+/// Which AMR variant a payload belongs to.
+///
+/// The two differ in more than sample rate: the frame-type numbering is
+/// different, which is the trap. In **AMR-NB** FT 0..=7 are speech and **FT 8 is
+/// SID**; in **AMR-WB** FT 0..=8 are speech and **FT 9 is SID**. An FT 8 frame
+/// is a 12.2 kbit/s speech frame in one and a comfort-noise descriptor in the
+/// other, so a payload cannot be interpreted without knowing its band.
+///
+/// Tables: TS 26.101 §4 (NB frame format), TS 26.201 (WB), summarised in
+/// RFC 4867 Table 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// AMR narrowband, 8 kHz, 160 samples per 20 ms frame.
+    Nb,
+    /// AMR wideband, 16 kHz, 320 samples per 20 ms frame.
+    Wb,
+}
+
+impl Band {
+    /// RTP clock rate in Hz.
+    pub fn clock_rate(self) -> u32 {
+        match self {
+            Band::Nb => 8_000,
+            Band::Wb => 16_000,
+        }
+    }
+
+    /// PCM samples per 20 ms frame, per channel.
+    pub fn frame_samples(self) -> usize {
+        match self {
+            Band::Nb => 160,
+            Band::Wb => 320,
+        }
+    }
+
+    /// Largest speech frame in octets (12.2 kbit/s for NB, 23.85 for WB).
+    pub fn max_speech_bytes(self) -> usize {
+        match self {
+            Band::Nb => 31,
+            Band::Wb => 60,
+        }
+    }
+
+    /// The speech frame types of this band, as a contiguous range.
+    fn speech_fts(self) -> core::ops::RangeInclusive<u8> {
+        match self {
+            Band::Nb => 0..=7,
+            Band::Wb => 0..=8,
+        }
+    }
+
+    /// The frame type that carries SID (comfort noise).
+    pub fn sid_ft(self) -> u8 {
+        match self {
+            Band::Nb => 8,
+            Band::Wb => 9,
+        }
+    }
+
+    fn speech_bytes_table(self) -> &'static [usize] {
+        match self {
+            // 95, 103, 118, 134, 148, 159, 204, 244 bits.
+            Band::Nb => &[12, 13, 15, 17, 19, 20, 26, 31],
+            // 132..477 bits.
+            Band::Wb => &[17, 23, 32, 36, 40, 46, 50, 58, 60],
+        }
+    }
+
+    fn speech_bits_table(self) -> &'static [usize] {
+        match self {
+            Band::Nb => &[95, 103, 118, 134, 148, 159, 204, 244],
+            Band::Wb => &[132, 177, 253, 285, 317, 365, 397, 461, 477],
+        }
+    }
+
+    /// Octets of a frame's data field, excluding the ToC octet.
+    pub fn frame_size(self, ft: u8) -> Option<usize> {
+        let table = self.speech_bytes_table();
+        if self.speech_fts().contains(&ft) {
+            return table.get(ft as usize).copied();
+        }
+        if ft == self.sid_ft() {
+            // Both bands: a SID frame is 39 (NB) or 40 (WB) bits, which fits
+            // in five octets either way.
+            return Some(5);
+        }
+        match ft {
+            14 | 15 => Some(0),
+            _ => None,
+        }
+    }
+
+    /// Speech bits of a mode, or 0 for anything that is not speech.
+    pub fn speech_bits(self, mode: u8) -> usize {
+        if !self.speech_fts().contains(&mode) {
+            return 0;
+        }
+        self.speech_bits_table()
+            .get(mode as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Classify a frame type within this band.
+    pub fn classify(self, ft: u8) -> FrameKind {
+        if self.speech_fts().contains(&ft) {
+            return FrameKind::Speech { mode: ft };
+        }
+        if ft == self.sid_ft() {
+            return FrameKind::Sid;
+        }
+        match ft {
+            14 => FrameKind::Lost,
+            15 => FrameKind::NoData,
+            other => FrameKind::Reserved { ft: other },
+        }
+    }
+}
 /// Largest AMR-WB speech frame (23.85 kbit/s), in octets.
 pub const MAX_SPEECH_BYTES: usize = 60;
-
-/// Speech frame sizes in octets for FT 0..=8 (AMR-WB modes).
-const SPEECH_BYTES: [usize; 9] = [17, 23, 32, 36, 40, 46, 50, 58, 60];
-/// AMR-WB SID frame is 40 bits.
-const SID_BYTES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadMode {
@@ -71,11 +189,14 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn speech(mode: u8, data: Vec<u8>, quality: bool) -> Result<Self, AmrError> {
-        if mode > 8 {
+    /// A speech frame in `band`.
+    pub fn speech_in(band: Band, mode: u8, data: Vec<u8>, quality: bool) -> Result<Self, AmrError> {
+        let Some(expected) = band.frame_size(mode) else {
+            return Err(AmrError::ReservedFrameType(mode));
+        };
+        if !matches!(band.classify(mode), FrameKind::Speech { .. }) {
             return Err(AmrError::ReservedFrameType(mode));
         }
-        let expected = frame_size(mode).unwrap();
         if data.len() != expected {
             return Err(AmrError::FrameSize {
                 ft: mode,
@@ -91,16 +212,26 @@ impl Frame {
         })
     }
 
-    pub fn sid(data: Vec<u8>, quality: bool) -> Result<Self, AmrError> {
-        if data.len() != SID_BYTES {
+    /// The AMR-WB speech constructor, kept for the existing callers.
+    pub fn speech(mode: u8, data: Vec<u8>, quality: bool) -> Result<Self, AmrError> {
+        Self::speech_in(Band::Wb, mode, data, quality)
+    }
+
+    /// A SID frame in `band` (FT 8 in AMR-NB, FT 9 in AMR-WB).
+    pub fn sid_in(band: Band, data: Vec<u8>, quality: bool) -> Result<Self, AmrError> {
+        let ft = band.sid_ft();
+        let Some(expected) = band.frame_size(ft) else {
+            return Err(AmrError::ReservedFrameType(ft));
+        };
+        if data.len() != expected {
             return Err(AmrError::FrameSize {
-                ft: 9,
-                expected: SID_BYTES,
+                ft,
+                expected,
                 got: data.len(),
             });
         }
         Ok(Self {
-            ft: 9,
+            ft,
             quality,
             padding: 0,
             data,
@@ -125,6 +256,17 @@ impl Frame {
         }
     }
 
+    /// The AMR-WB SID constructor, kept for the existing callers.
+    pub fn sid(data: Vec<u8>, quality: bool) -> Result<Self, AmrError> {
+        Self::sid_in(Band::Wb, data, quality)
+    }
+
+    /// Classify this frame within `band`.
+    pub fn kind_in(&self, band: Band) -> FrameKind {
+        band.classify(self.ft)
+    }
+
+    /// Classify this frame as AMR-WB.
     pub fn kind(&self) -> FrameKind {
         classify_ft(self.ft)
     }
@@ -142,31 +284,20 @@ impl Frame {
     }
 }
 
+/// Classify a frame type as AMR-WB. AMR-NB callers must use
+/// [`Band::classify`], because FT 8 is SID in NB and speech in WB.
 pub fn classify_ft(ft: u8) -> FrameKind {
-    match ft {
-        0..=8 => FrameKind::Speech { mode: ft },
-        9 => FrameKind::Sid,
-        14 => FrameKind::Lost,
-        15 => FrameKind::NoData,
-        other => FrameKind::Reserved { ft: other },
-    }
+    Band::Wb.classify(ft)
 }
 
-/// Speech bits for AMR-WB mode 0..=8.
+/// Speech bits for an AMR-WB mode.
 pub fn speech_bits(mode: u8) -> usize {
-    // 132, 177, 253, 285, 317, 365, 397, 461, 477 bits.
-    let bits = [132usize, 177, 253, 285, 317, 365, 397, 461, 477];
-    bits.get(mode as usize).copied().unwrap_or(0)
+    Band::Wb.speech_bits(mode)
 }
 
-/// Octets occupied by a frame's data field (excluding the ToC octet).
+/// Octets of an AMR-WB frame's data field (excluding the ToC octet).
 pub fn frame_size(ft: u8) -> Option<usize> {
-    match ft {
-        0..=8 => Some(SPEECH_BYTES[ft as usize]),
-        9 => Some(SID_BYTES),
-        14 | 15 => Some(0),
-        _ => None,
-    }
+    Band::Wb.frame_size(ft)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,41 +322,88 @@ impl Payload {
         })
     }
 
-    /// Parse the default octet-aligned representation.
+    /// Parse the default octet-aligned representation as AMR-WB.
     pub fn parse(payload: &[u8]) -> Result<Self, AmrError> {
         Self::parse_mode(payload, PayloadMode::OctetAligned)
     }
 
-    pub fn parse_mode(payload: &[u8], mode: PayloadMode) -> Result<Self, AmrError> {
+    /// Parse an octet-aligned payload in `band`, which decides how the frame
+    /// types are read: FT 8 is SID in AMR-NB and speech in AMR-WB.
+    pub fn parse_in(band: Band, payload: &[u8]) -> Result<Self, AmrError> {
+        Self::parse_mode_in(band, payload, PayloadMode::OctetAligned)
+    }
+
+    /// Parse `payload` in `band` using `mode`.
+    pub fn parse_mode_in(band: Band, payload: &[u8], mode: PayloadMode) -> Result<Self, AmrError> {
         match mode {
-            PayloadMode::OctetAligned => parse_octet_aligned(payload),
+            PayloadMode::OctetAligned => parse_octet_aligned_in(band, payload),
             PayloadMode::BandwidthEfficient | PayloadMode::Storage => {
                 Err(AmrError::UnsupportedMode(mode))
             }
         }
     }
 
+    pub fn parse_mode(payload: &[u8], mode: PayloadMode) -> Result<Self, AmrError> {
+        match mode {
+            PayloadMode::OctetAligned => parse_octet_aligned_in(Band::Wb, payload),
+            PayloadMode::BandwidthEfficient | PayloadMode::Storage => {
+                Err(AmrError::UnsupportedMode(mode))
+            }
+        }
+    }
+
+    /// Serialise as AMR-WB.
     pub fn to_bytes(&self) -> Result<Vec<u8>, AmrError> {
         self.to_bytes_mode(PayloadMode::OctetAligned)
     }
 
-    pub fn to_bytes_mode(&self, mode: PayloadMode) -> Result<Vec<u8>, AmrError> {
+    /// Serialise in `band`.
+    pub fn to_bytes_in(&self, band: Band) -> Result<Vec<u8>, AmrError> {
+        self.to_bytes_mode_in(band, PayloadMode::OctetAligned)
+    }
+
+    /// Serialise in `band` using `mode`.
+    pub fn to_bytes_mode_in(&self, band: Band, mode: PayloadMode) -> Result<Vec<u8>, AmrError> {
         match mode {
-            PayloadMode::OctetAligned => serialize_octet_aligned(self),
+            PayloadMode::OctetAligned => serialize_octet_aligned(band, self),
             PayloadMode::BandwidthEfficient | PayloadMode::Storage => {
                 Err(AmrError::UnsupportedMode(mode))
             }
         }
     }
 
+    pub fn to_bytes_mode(&self, mode: PayloadMode) -> Result<Vec<u8>, AmrError> {
+        match mode {
+            PayloadMode::OctetAligned => serialize_octet_aligned(Band::Wb, self),
+            PayloadMode::BandwidthEfficient | PayloadMode::Storage => {
+                Err(AmrError::UnsupportedMode(mode))
+            }
+        }
+    }
+
+    /// Whether any frame is speech, read as AMR-WB.
     pub fn has_speech(&self) -> bool {
         self.frames.iter().any(Frame::is_speech)
     }
 
-    pub fn speech_modes(&self) -> Vec<u8> {
+    /// Whether any frame is speech in `band`.
+    pub fn has_speech_in(&self, band: Band) -> bool {
         self.frames
             .iter()
-            .filter_map(|f| match f.kind() {
+            .any(|f| matches!(f.kind_in(band), FrameKind::Speech { .. }))
+    }
+
+    /// The speech modes present, read as AMR-WB.
+    pub fn speech_modes(&self) -> Vec<u8> {
+        self.speech_modes_in(Band::Wb)
+    }
+
+    /// The speech modes present in `band`. Narrowband FT 8 is SID, so it is
+    /// excluded rather than reported as a 12.2 kbit/s frame.
+    pub fn speech_modes_in(&self, band: Band) -> Vec<u8> {
+        self.frames
+            .iter()
+            .filter_map(|f| match f.kind_in(band) {
                 FrameKind::Speech { mode } => Some(mode),
                 _ => None,
             })
@@ -233,7 +411,7 @@ impl Payload {
     }
 }
 
-fn parse_octet_aligned(payload: &[u8]) -> Result<Payload, AmrError> {
+fn parse_octet_aligned_in(band: Band, payload: &[u8]) -> Result<Payload, AmrError> {
     if payload.is_empty() {
         return Err(AmrError::Empty);
     }
@@ -250,7 +428,7 @@ fn parse_octet_aligned(payload: &[u8]) -> Result<Payload, AmrError> {
         let quality = toc & 0x04 != 0;
         let padding = toc & 0x03;
 
-        let size = frame_size(ft).ok_or(AmrError::ReservedFrameType(ft))?;
+        let size = band.frame_size(ft).ok_or(AmrError::ReservedFrameType(ft))?;
         if offset + size > payload.len() {
             return Err(AmrError::Truncated {
                 ft,
@@ -288,7 +466,7 @@ fn parse_octet_aligned(payload: &[u8]) -> Result<Payload, AmrError> {
     Ok(Payload { cmr, frames })
 }
 
-fn serialize_octet_aligned(payload: &Payload) -> Result<Vec<u8>, AmrError> {
+fn serialize_octet_aligned(band: Band, payload: &Payload) -> Result<Vec<u8>, AmrError> {
     if payload.frames.is_empty() {
         return Err(AmrError::Empty);
     }
@@ -299,7 +477,9 @@ fn serialize_octet_aligned(payload: &Payload) -> Result<Vec<u8>, AmrError> {
     out.push(payload.cmr << 4);
     let last = payload.frames.len() - 1;
     for (i, frame) in payload.frames.iter().enumerate() {
-        let expected = frame_size(frame.ft).ok_or(AmrError::ReservedFrameType(frame.ft))?;
+        let expected = band
+            .frame_size(frame.ft)
+            .ok_or(AmrError::ReservedFrameType(frame.ft))?;
         if frame.data.len() != expected {
             return Err(AmrError::FrameSize {
                 ft: frame.ft,
@@ -500,5 +680,90 @@ mod tests {
             assert_eq!(parsed, p);
             assert_eq!(parsed.frames[0].speech_bits(), Some(speech_bits(ft)));
         }
+    }
+}
+
+#[cfg(test)]
+mod nb_tests {
+    use super::*;
+
+    /// RFC 4867 Table 1: AMR-NB frame sizes in octets for FT 0..=8.
+    #[test]
+    fn narrowband_frame_sizes_match_rfc_4867() {
+        let expected = [12usize, 13, 15, 17, 19, 20, 26, 31];
+        for (ft, size) in expected.iter().enumerate() {
+            assert_eq!(Band::Nb.frame_size(ft as u8), Some(*size), "AMR-NB FT {ft}");
+        }
+        // FT 8 is SID in narrowband, not a 12.2 kbit/s speech mode.
+        assert_eq!(Band::Nb.frame_size(8), Some(5));
+        assert_eq!(Band::Nb.classify(8), FrameKind::Sid);
+        assert_eq!(Band::Nb.sid_ft(), 8);
+    }
+
+    /// The trap: the same FT means different things in the two bands.
+    #[test]
+    fn frame_type_eight_differs_between_bands() {
+        assert_eq!(Band::Nb.classify(8), FrameKind::Sid);
+        assert_eq!(Band::Wb.classify(8), FrameKind::Speech { mode: 8 });
+        assert_eq!(Band::Wb.classify(9), FrameKind::Sid);
+        // FT 9 is reserved in narrowband.
+        assert_eq!(Band::Nb.classify(9), FrameKind::Reserved { ft: 9 });
+        assert_eq!(Band::Nb.frame_size(9), None);
+    }
+
+    #[test]
+    fn narrowband_speech_bits_match_the_specification() {
+        // 4.75, 5.15, 5.90, 6.70, 7.40, 7.95, 10.2 and 12.2 kbit/s.
+        let bits = [95usize, 103, 118, 134, 148, 159, 204, 244];
+        for (mode, want) in bits.iter().enumerate() {
+            assert_eq!(Band::Nb.speech_bits(mode as u8), *want);
+        }
+        assert_eq!(Band::Nb.speech_bits(8), 0, "FT 8 is SID, not speech");
+    }
+
+    #[test]
+    fn clock_rate_and_frame_size_follow_the_band() {
+        assert_eq!(Band::Nb.clock_rate(), 8_000);
+        assert_eq!(Band::Nb.frame_samples(), 160);
+        assert_eq!(CLOCK_RATE_NB, 8_000);
+        assert_eq!(FRAME_SAMPLES_NB, 160);
+        assert_eq!(Band::Wb.clock_rate(), CLOCK_RATE);
+        assert_eq!(Band::Wb.frame_samples(), FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn a_narrowband_payload_round_trips() {
+        let speech = Frame::speech_in(Band::Nb, 7, vec![0x5A; 31], true).unwrap();
+        let sid = Frame::sid_in(Band::Nb, vec![0x00; 5], true).unwrap();
+        assert_eq!(sid.ft, 8, "narrowband SID is FT 8");
+        let payload = Payload::new(7, vec![speech.clone(), sid.clone()]);
+
+        let bytes = payload.to_bytes_in(Band::Nb).unwrap();
+        // CMR octet, then one ToC octet per frame plus their data.
+        assert_eq!(bytes.len(), 1 + 1 + 31 + 1 + 5);
+        assert_eq!(bytes[0] >> 4, 7);
+
+        let parsed = Payload::parse_in(Band::Nb, &bytes).unwrap();
+        assert_eq!(parsed.frames.len(), 2);
+        assert_eq!(parsed.frames[0], speech);
+        assert_eq!(parsed.frames[1], sid);
+        assert_eq!(parsed.speech_modes_in(Band::Nb), vec![7]);
+        assert!(parsed.has_speech_in(Band::Nb));
+    }
+
+    /// The same octets read in the other band are a different conversation,
+    /// which is why the band has to come from the SDP and not from the payload.
+    #[test]
+    fn the_same_bytes_parse_differently_in_each_band() {
+        // FT 8 with 31 octets of data is a valid AMR-WB 23.85 kbit/s frame and
+        // a malformed AMR-NB SID (which must be 5 octets).
+        let mut bytes = vec![0x00u8];
+        bytes.push(8 << 3);
+        // AMR-WB FT 8 is the 23.85 kbit/s mode: 60 octets.
+        bytes.extend_from_slice(&[0u8; 60]);
+
+        assert!(Payload::parse_in(Band::Wb, &bytes).is_ok());
+        // In narrowband FT 8 is SID: five octets, and the rest is trailing.
+        assert!(Payload::parse_in(Band::Nb, &bytes).is_err());
     }
 }
