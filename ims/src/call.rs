@@ -43,6 +43,9 @@ pub enum CallEvent {
     Established { ack: Request },
     /// A hold/resume re-INVITE was accepted: send the carried ACK.
     Renegotiated { ack: Request },
+    /// A second (forked) 2xx to the original INVITE: ACK it, then BYE that
+    /// branch; the first dialog stays the active one (RFC 3261 §13.2.2.4).
+    Forked { ack: Request, bye: Request },
     /// A non-2xx final response to INVITE ended the attempt.
     Failed(u16),
     /// A provisional response (e.g. 100 Trying) needed no action.
@@ -186,16 +189,23 @@ impl Call {
                 if let Some(answer) = self.capture_answer(response) {
                     self.answer = Some(answer);
                 }
-                // A 2xx while Established answers a hold/resume re-INVITE: the
-                // ACK must reuse that re-INVITE's CSeq (RFC 3261 §14.1).
+                // A 2xx while Established is either the answer to a hold/resume
+                // re-INVITE or a second (forked) 2xx for the original INVITE.
                 if self.state == CallState::Established {
-                    let cseq = self
-                        .pending_reinvite_cseq
-                        .take()
-                        .unwrap_or(self.dialog.invite_cseq);
-                    return CallEvent::Renegotiated {
-                        ack: self.dialog.ack_with_cseq(cseq),
-                    };
+                    let resp_cseq = response.headers.cseq().map(|c| c.seq);
+                    if let (Some(pending), Some(got)) = (self.pending_reinvite_cseq, resp_cseq) {
+                        if pending == got {
+                            self.pending_reinvite_cseq = None;
+                            return CallEvent::Renegotiated {
+                                ack: self.dialog.ack_with_cseq(pending),
+                            };
+                        }
+                    }
+                    // RFC 3261 §13.2.2.4: ACK every 2xx, keep the first dialog,
+                    // and BYE the others.
+                    if let Some((ack, bye)) = self.fork_ack_bye(response) {
+                        return CallEvent::Forked { ack, bye };
+                    }
                 }
                 let ack = self.dialog.ack();
                 self.state = CallState::Established;
@@ -265,6 +275,39 @@ impl Call {
         let cancel = self.dialog.cancel()?;
         self.state = CallState::Cancelling;
         Some(cancel)
+    }
+
+    /// Build the ACK and BYE for a forked 2xx that has its own remote tag,
+    /// Contact and route set (RFC 3261 §13.2.2.4).
+    fn fork_ack_bye(&self, response: &Response) -> Option<(Request, Request)> {
+        let cseq = response.headers.cseq()?;
+        let remote_tag = crate::dialog::extract_tag(response.headers.get("to")?)?;
+        let contact = response.headers.get("contact")?;
+        let remote_target = sip::NameAddr::parse(contact).ok()?.uri.to_string();
+        let route_set: Vec<String> = response
+            .headers
+            .get_all("record-route")
+            .map(|v| {
+                v.trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_string()
+            })
+            .collect();
+        let mut forked = Dialog::new(
+            self.dialog.call_id.clone(),
+            self.dialog.local_uri.clone(),
+            remote_target,
+            self.dialog.local_tag.clone(),
+            remote_tag,
+            self.dialog.local_contact.clone(),
+        )
+        .with_invite_cseq(cseq.seq)
+        .with_route_set(route_set);
+        forked.confirm();
+        let ack = forked.ack_with_cseq(cseq.seq);
+        let bye = forked.bye();
+        Some((ack, bye))
     }
 
     /// Parse the SDP answer body of a response, if it has one.
@@ -569,6 +612,85 @@ mod tests {
         let mut call = Call::new(profile(), "sip:b@example");
         let _ = call.invite();
         assert!(call.hold().is_none());
+    }
+
+    #[test]
+    fn a_forked_2xx_is_acked_and_bye_d_sent_to_it() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        // First 200 establishes the dialog.
+        let ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[
+                ("CSeq", "1 INVITE"),
+                ("To", "<sip:b@example>;tag=branch-a"),
+                ("Contact", "<sip:b@10.0.0.1:5060>"),
+            ]),
+            body: Vec::new(),
+        };
+        assert!(matches!(
+            call.on_response(&ok),
+            CallEvent::Established { .. }
+        ));
+
+        // A second 200 for the same INVITE is a fork: ACK it and BYE it.
+        let fork = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[
+                ("CSeq", "1 INVITE"),
+                ("To", "<sip:b@example>;tag=branch-b"),
+                ("Contact", "<sip:b@10.0.0.2:5060>"),
+                ("Record-Route", "<sip:rr2.example;lr>"),
+            ]),
+            body: Vec::new(),
+        };
+        match call.on_response(&fork) {
+            CallEvent::Forked { ack, bye } => {
+                assert_eq!(ack.method, Method::Ack);
+                assert_eq!(bye.method, Method::Bye);
+                // Both target the forked branch, not the active dialog.
+                assert!(ack.headers.get("to").unwrap().contains("branch-b"));
+                assert!(bye.headers.get("to").unwrap().contains("branch-b"));
+                assert_eq!(ack.uri, "sip:rr2.example;lr");
+                assert_eq!(ack.headers.cseq().unwrap().seq, 1);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // The active dialog is unchanged.
+        assert_eq!(call.state(), CallState::Established);
+    }
+
+    #[test]
+    fn a_reinvite_2xx_is_not_treated_as_a_fork() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        let ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[("CSeq", "1 INVITE"), ("To", "<sip:b@example>;tag=b")]),
+            body: Vec::new(),
+        };
+        assert!(matches!(
+            call.on_response(&ok),
+            CallEvent::Established { .. }
+        ));
+        let hold = call.hold().expect("hold");
+        let hold_cseq = hold.headers.cseq().unwrap().seq;
+        let ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[
+                ("CSeq", &format!("{hold_cseq} INVITE")),
+                ("To", "<sip:b@example>;tag=b"),
+            ]),
+            body: Vec::new(),
+        };
+        assert!(matches!(
+            call.on_response(&ok),
+            CallEvent::Renegotiated { .. }
+        ));
     }
 
     fn resp_headers(pairs: &[(&str, &str)]) -> sip::Headers {
