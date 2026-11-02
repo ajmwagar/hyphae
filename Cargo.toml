@@ -18,6 +18,7 @@ members = [
     "usim",
     "cli",
     "tests/conformance",
+    "lab/emergency",
     "lab/epdg",
 ]
 

@@ -152,6 +152,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "emergency-lab"
+version = "0.1.0"
+dependencies = [
+ "ims",
+ "sip",
+]
+
+[[package]]
 name = "epdg"
 version = "0.1.0"
 dependencies = [
