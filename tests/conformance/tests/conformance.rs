@@ -2670,3 +2670,87 @@ fn epdg_017_discovery_fqdns_match_the_specification_examples() {
     let us = PlmnId::new("310", "260").unwrap();
     assert_eq!(epdg_fqdn(&us), "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org");
 }
+
+// --- EPDG-018: ISIM provisions the IMS identity -------------------------
+
+#[test]
+fn epdg_018_isim_provisions_the_ims_identity() {
+    use ims::profile::IsimIdentity;
+    use usim::isim::{
+        read_binary, read_record, select_aid, select_ef, unwrap_identity_tlv, EF_IMPI, EF_IMPU,
+        ISIM_AID, TAG_IDENTITY,
+    };
+
+    // The commands are the ones TS 31.103 implies for these files.
+    assert_eq!(
+        select_aid(&ISIM_AID).to_bytes(),
+        vec![0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04, 0x00]
+    );
+    assert_eq!(
+        select_ef(EF_IMPI).to_bytes(),
+        vec![0x00, 0xA4, 0x00, 0x00, 0x02, 0x6F, 0x02, 0x00]
+    );
+    assert_eq!(
+        read_binary(0x00).to_bytes(),
+        vec![0x00, 0xB0, 0x00, 0x00, 0x00]
+    );
+    assert_eq!(
+        read_record(1).to_bytes(),
+        vec![0x00, 0xB2, 0x01, 0x04, 0x00]
+    );
+    assert_eq!(EF_IMPU, [0x6F, 0x04]);
+
+    // Identities travel as a `80` TLV holding UTF-8.
+    let impi = "310260123456789@ims.mnc260.mcc310.3gppnetwork.org";
+    let mut tlv = vec![TAG_IDENTITY, impi.len() as u8];
+    tlv.extend_from_slice(impi.as_bytes());
+    assert_eq!(unwrap_identity_tlv(&tlv).unwrap(), impi.as_bytes());
+
+    // And an ISIM overrides what the IMSI would have produced.
+    let mut profile = ims::profile::ImsProfile::lab_default();
+    profile.private_identity = "310260123456789@derived.example".into();
+    profile.public_identity = "sip:310260123456789@derived.example".into();
+    let isim = IsimIdentity {
+        impi: impi.to_string(),
+        impu: vec!["sip:310260123456789@ims.mnc260.mcc310.3gppnetwork.org".into()],
+        home_domain: Some("ims.mnc260.mcc310.3gppnetwork.org".into()),
+    };
+    assert!(profile.apply_isim(&isim));
+    assert_eq!(profile.private_identity, impi);
+    assert!(profile
+        .public_identity
+        .starts_with("sip:310260123456789@ims."));
+    assert_eq!(profile.realm, "ims.mnc260.mcc310.3gppnetwork.org");
+}
+
+// --- EPDG-019: P-Access-Network-Info ------------------------------------
+
+#[test]
+fn epdg_019_pani_reports_the_access_network() {
+    use ims::pani::{AccessNetwork, HEADER_NAME};
+
+    assert_eq!(HEADER_NAME, "P-Access-Network-Info");
+
+    // Wi-Fi calling: the access point's BSSID, bare hex (TS 24.229 example).
+    let wlan = AccessNetwork::wlan([0x00, 0x0C, 0xF1, 0x12, 0x60, 0x28]);
+    assert_eq!(
+        wlan.header_value(),
+        "IEEE-802.11; i-wlan-node-id=000cf1126028"
+    );
+    assert!(!wlan.is_3gpp());
+
+    // Cellular: MCC + MNC (not padded here) + TAC + ECI, all hex after the PLMN.
+    let eutran = AccessNetwork::Eutran {
+        mcc: "111".into(),
+        mnc: "22".into(),
+        tac: 0x33C4,
+        eci: 0x76B4321,
+        tdd: false,
+        five_gc: false,
+    };
+    assert_eq!(
+        eutran.header_value(),
+        "3GPP-E-UTRAN-FDD; utran-cell-id-3gpp=1112233C476B4321"
+    );
+    assert!(eutran.is_3gpp());
+}

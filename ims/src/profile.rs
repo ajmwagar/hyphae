@@ -122,6 +122,27 @@ pub struct ImsProfile {
     pub amr_wb_modes: Vec<u8>,
 }
 
+/// The IMS identities a card's ISIM provisions (TS 31.103 §4.2.2–4.2.4).
+///
+/// This is the value *shape* only. `ims` deliberately does not depend on
+/// `usim`: whoever holds the card reads it and hands the result here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsimIdentity {
+    /// `EF_IMPI` — the private identity.
+    pub impi: String,
+    /// `EF_IMPU` — public identities, first record first (the default).
+    pub impu: Vec<String>,
+    /// `EF_DOMAIN` — the home network domain, when the card provisions it.
+    pub home_domain: Option<String>,
+}
+
+impl IsimIdentity {
+    /// The default public identity: the first `EF_IMPU` record.
+    pub fn default_impu(&self) -> Option<&str> {
+        self.impu.first().map(String::as_str)
+    }
+}
+
 impl ImsProfile {
     /// Lab defaults for the Open5GS/Kamailio profile in `carrier/profiles/00101.toml`.
     pub fn lab_default() -> Self {
@@ -151,6 +172,33 @@ impl ImsProfile {
             transport: "UDP".into(),
             amr_wb_modes: vec![0, 1, 2, 3, 4, 5, 6, 7],
         }
+    }
+
+    /// Override the derived identities with what the card's ISIM provisions.
+    ///
+    /// An ISIM always wins over the IMSI-derived forms: it can name a different
+    /// domain, an alphanumeric IMPU, or several public identities, and there is
+    /// no way to derive those. Returns `false` and changes nothing when the
+    /// ISIM carries no usable public identity.
+    pub fn apply_isim(&mut self, isim: &IsimIdentity) -> bool {
+        let Some(impu) = isim.default_impu() else {
+            return false;
+        };
+        self.private_identity = isim.impi.clone();
+        self.public_identity = impu.to_string();
+        if let Some(domain) = &isim.home_domain {
+            self.home_domain = domain.clone();
+            self.realm = domain.clone();
+        } else if let Some(domain) = impu
+            .strip_prefix("sip:")
+            .and_then(|rest| rest.split_once('@'))
+            .map(|(_, domain)| domain)
+        {
+            // No EF_DOMAIN: the realm follows the IMPU's domain.
+            self.home_domain = domain.to_string();
+            self.realm = domain.to_string();
+        }
+        true
     }
 
     /// Build the runtime IMS profile from a carrier TOML profile plus the
@@ -263,6 +311,64 @@ fn with_default_port(host: &str, port: u16) -> String {
 impl Default for ImsProfile {
     fn default() -> Self {
         Self::lab_default()
+    }
+}
+
+#[cfg(test)]
+mod isim_tests {
+    use super::*;
+
+    fn profile() -> ImsProfile {
+        let mut p = ImsProfile::lab_default();
+        p.private_identity = "310260123456789@ims.mnc260.mcc310.3gppnetwork.org".into();
+        p.public_identity = "sip:310260123456789@ims.mnc260.mcc310.3gppnetwork.org".into();
+        p.home_domain = "ims.mnc260.mcc310.3gppnetwork.org".into();
+        p.realm = p.home_domain.clone();
+        p
+    }
+
+    #[test]
+    fn an_isim_overrides_the_imsi_derived_identities() {
+        let mut p = profile();
+        assert!(p.private_identity.starts_with("310260123456789@"));
+
+        let isim = IsimIdentity {
+            impi: "310260123456789@ims.mnc260.mcc310.3gppnetwork.org".into(),
+            impu: vec![
+                "sip:user@example.net".into(),
+                "sip:other@example.net".into(),
+            ],
+            home_domain: Some("example.net".into()),
+        };
+        assert!(p.apply_isim(&isim));
+        assert_eq!(p.public_identity, "sip:user@example.net");
+        assert_eq!(p.home_domain, "example.net");
+        assert_eq!(p.realm, "example.net");
+    }
+
+    #[test]
+    fn without_a_domain_file_the_realm_follows_the_impu() {
+        let mut p = profile();
+        let isim = IsimIdentity {
+            impi: "1234@ims.example".into(),
+            impu: vec!["sip:alice@ims.example".into()],
+            home_domain: None,
+        };
+        assert!(p.apply_isim(&isim));
+        assert_eq!(p.realm, "ims.example");
+    }
+
+    #[test]
+    fn an_isim_with_no_impu_leaves_derivation_alone() {
+        let mut p = profile();
+        let before = p.clone();
+        let isim = IsimIdentity {
+            impi: "1234@ims.example".into(),
+            impu: Vec::new(),
+            home_domain: None,
+        };
+        assert!(!p.apply_isim(&isim));
+        assert_eq!(p, before);
     }
 }
 

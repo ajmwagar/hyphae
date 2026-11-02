@@ -18,6 +18,7 @@ pub mod continuity;
 pub mod dialog;
 pub mod emergency;
 pub mod keepalive;
+pub mod pani;
 pub mod profile;
 pub mod register;
 pub mod sdp;

@@ -29,12 +29,14 @@
 pub mod apdu;
 pub mod at;
 pub mod card;
+pub mod isim;
 pub mod qmi;
 pub mod software;
 
 pub use apdu::{authenticate_command, parse_authenticate_response, Apdu, AuthenticateResponse};
 pub use at::{AtApdu, AtChannel};
 pub use card::{ApduChannel, CardResponse, LoopbackChannel, UsimCard};
+pub use isim::{Isim, IsimError, ISIM_AID};
 pub use qmi::{QmiApdu, QmiExchange};
 pub use software::SoftwareUsim;
 
