@@ -195,6 +195,13 @@ and evaluating Milenage as a USIM would, and `StandInEpdg` is an ePDG that
 shares nothing with it but the subscriber key — so a completed exchange means
 the key chain agreed, not that both sides used one fixture.
 
+Identity comes from the card: `usim::isim` reads `EF_IMPI`/`EF_IMPU`/`EF_DOMAIN`
+through the same APDU channel as `AUTHENTICATE`, and `ImsProfile::apply_isim`
+lets those values override the IMSI-derived ones (TS 31.103). When the card has
+no ISIM the IMSI derivation stands, which is the common case on older SIMs.
+`ims::pani` reports the access network — `IEEE-802.11` with `i-wlan-node-id` for
+Wi-Fi calling, `3GPP-E-UTRAN-*` with `utran-cell-id-3gpp` for cellular.
+
 Not implemented yet: the PC/SC adapter that would put a real USIM behind the
 same driver.
 
