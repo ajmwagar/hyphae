@@ -62,12 +62,20 @@ dependencies = [
  "carrier",
  "codec",
  "codec-amr",
+ "epdg",
  "evs",
  "ims",
  "media",
  "sip",
  "transport",
  "usim",
+]
+
+[[package]]
+name = "epdg"
+version = "0.1.0"
+dependencies = [
+ "aka",
 ]
 
 [[package]]

@@ -172,8 +172,10 @@ AP-side path, where the modem's voice PCM has to reach userspace.
 ePDG authenticated with EAP-AKA'. The crypto core is in
 `aka::eap_aka_prime`: `CK'/IK'` bound to the access-network name, the RFC 5448
 `PRF'` expansion into `K_encr`/`K_aut`/`K_re`/`MSK`/`EMSK`, the AT attribute
-framing and `AT_MAC`. The IKEv2 exchange and the S2b bearer are not implemented
-yet; this is the part that reuses the AKA keys the client already has.
+framing and `AT_MAC`. The `epdg` crate adds the IKEv2 message/payload codec and
+an EAP-AKA' peer that verifies the server MAC and answers with `AT_RES`. Not
+implemented yet: Diffie-Hellman, the SK encryption/integrity layer, the
+IKE_SA_INIT/SA_AUTH state machine and the S2b bearer.
 
 ## 7. ARM-first targets
 
