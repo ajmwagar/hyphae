@@ -126,10 +126,10 @@ pub fn pidf_without_location(entity: &str) -> String {
 pub fn location_publish(
     dialog: &mut crate::Dialog,
     entity: &str,
-    location: Option<Geolocation>,
+    location: Option<Location>,
 ) -> sip::Request {
     let body = match location {
-        Some(location) => location.to_pidf_lo(entity),
+        Some(location) => location.to_pidf(entity),
         None => pidf_without_location(entity),
     };
     dialog.publish(
@@ -139,6 +139,394 @@ pub fn location_publish(
     )
 }
 
+/// The XML namespace of the civic address (RFC 5139 §2). The conventional
+/// prefix is `cac`.
+pub const CIVIC_NS: &str = "urn:ietf:params:xml:ns:pidf:geopriv10:civicAddr";
+
+/// Escape text for XML character data and attribute values.
+///
+/// A civic address is typed by a person and an `entity` is a SIP URI, so both
+/// contain `&`, `<` or a quote sooner or later. Without this, a street name can
+/// break the PIDF-LO — or inject markup into it.
+pub fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A civic address (RFC 5139 §2).
+///
+/// The fields are the elements of the RFC 5139 schema, in schema order: the
+/// document is an `xs:sequence`, so the order of the emitted elements is not
+/// cosmetic. Every field is optional because a civic address is a
+/// best-effort description — a user may know their street but not their
+/// building.
+///
+/// ```text
+/// country, A1..A6, PRM, PRD, RD, STS, POD, POM, RDSEC, RDBR, RDSUBBR,
+/// HNO, HNS, LMK, LOC, FLR, NAM, PC, BLD, UNIT, ROOM, SEAT, PLC, PCN,
+/// POBOX, ADDCODE
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CivicAddress {
+    /// `xml:lang` of the address fields (RFC 5139 §3.1).
+    language: Option<String>,
+    /// ISO 3166-1 alpha-2 country code.
+    country: Option<String>,
+    /// A1..A6: the national administrative subdivisions, most general first.
+    a: [Option<String>; 6],
+    /// PRM: pre-modifier.
+    pre_modifier: Option<String>,
+    /// PRD: leading street direction.
+    pre_direction: Option<String>,
+    /// RD: road or street name.
+    road: Option<String>,
+    /// STS: street suffix.
+    street_suffix: Option<String>,
+    /// POD: trailing street suffix.
+    post_direction: Option<String>,
+    /// POM: post-modifier.
+    post_modifier: Option<String>,
+    /// RDSEC, RDBR, RDSUBBR: road section, branch and sub-branch.
+    road_section: Option<String>,
+    road_branch: Option<String>,
+    road_sub_branch: Option<String>,
+    /// HNO: house number.
+    house_number: Option<String>,
+    /// HNS: house number suffix.
+    house_number_suffix: Option<String>,
+    /// LMK: landmark.
+    landmark: Option<String>,
+    /// LOC: additional location information.
+    additional: Option<String>,
+    /// FLR: floor.
+    floor: Option<String>,
+    /// NAM: name of the place.
+    name: Option<String>,
+    /// PC: postal code.
+    postal_code: Option<String>,
+    /// BLD: building.
+    building: Option<String>,
+    /// UNIT: unit.
+    unit: Option<String>,
+    /// ROOM: room.
+    room: Option<String>,
+    /// SEAT: seat.
+    seat: Option<String>,
+    /// PLC: place type.
+    place_type: Option<String>,
+    /// PCN: postal community name.
+    postal_community: Option<String>,
+    /// POBOX: post office box.
+    post_office_box: Option<String>,
+    /// ADDCODE: additional code.
+    additional_code: Option<String>,
+}
+
+impl CivicAddress {
+    /// An empty address: nothing is rendered until a field is set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set a textual field, normalising it the way `xs:token` requires.
+    ///
+    /// `xs:token` collapses runs of whitespace and trims the ends, so a value
+    /// that is only whitespace becomes absent rather than an empty element.
+    fn set(slot: &mut Option<String>, value: impl Into<String>) {
+        let value = value.into();
+        let normalised = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        *slot = if normalised.is_empty() {
+            None
+        } else {
+            Some(normalised)
+        };
+    }
+
+    /// The language of the address fields (`xml:lang`, RFC 5139 §3.1).
+    pub fn language(mut self, language: impl Into<String>) -> Self {
+        Self::set(&mut self.language, language);
+        self
+    }
+
+    /// The ISO 3166-1 alpha-2 country code.
+    ///
+    /// Returns an error for anything that is not two uppercase ASCII letters,
+    /// which is what the RFC 5139 schema allows (`[A-Z]{2}`).
+    pub fn country(mut self, country: impl Into<String>) -> Result<Self, EmergencyError> {
+        let country = country.into().trim().to_string();
+        if country.len() != 2 || !country.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(EmergencyError::BadCountry(country));
+        }
+        self.country = Some(country);
+        Ok(self)
+    }
+
+    /// Set administrative area `n` (1..=6), most general first.
+    ///
+    /// `n` is the digit of the `A<n>` element: `A1` is usually a state or
+    /// province, `A3` a city, `A4` a district.
+    pub fn area(mut self, n: usize, value: impl Into<String>) -> Self {
+        if (1..=6).contains(&n) {
+            Self::set(&mut self.a[n - 1], value);
+        }
+        self
+    }
+
+    /// `PRM`, the pre-modifier.
+    pub fn pre_modifier(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.pre_modifier, value);
+        self
+    }
+
+    /// `PRD`, the leading street direction.
+    pub fn pre_direction(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.pre_direction, value);
+        self
+    }
+
+    /// `RD`, the road or street name.
+    pub fn road(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.road, value);
+        self
+    }
+
+    /// `STS`, the street suffix.
+    pub fn street_suffix(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.street_suffix, value);
+        self
+    }
+
+    /// `POD`, the trailing street suffix.
+    pub fn post_direction(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.post_direction, value);
+        self
+    }
+
+    /// `POM`, the post-modifier.
+    pub fn post_modifier(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.post_modifier, value);
+        self
+    }
+
+    /// `HNO`, the house number.
+    pub fn house_number(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.house_number, value);
+        self
+    }
+
+    /// `HNS`, the house number suffix.
+    pub fn house_number_suffix(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.house_number_suffix, value);
+        self
+    }
+
+    /// `LMK`, a landmark.
+    pub fn landmark(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.landmark, value);
+        self
+    }
+
+    /// `LOC`, additional location information.
+    pub fn additional(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.additional, value);
+        self
+    }
+
+    /// `FLR`, the floor.
+    pub fn floor(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.floor, value);
+        self
+    }
+
+    /// `NAM`, the name of the place.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.name, value);
+        self
+    }
+
+    /// `PC`, the postal code.
+    pub fn postal_code(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.postal_code, value);
+        self
+    }
+
+    /// `BLD`, the building.
+    pub fn building(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.building, value);
+        self
+    }
+
+    /// `UNIT`, the unit.
+    pub fn unit(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.unit, value);
+        self
+    }
+
+    /// `ROOM`, the room.
+    pub fn room(mut self, value: impl Into<String>) -> Self {
+        Self::set(&mut self.room, value);
+        self
+    }
+
+    /// Whether the address carries anything at all.
+    ///
+    /// An address with no fields is not worth sending: it would assert that the
+    /// UE knows where it is while saying nothing.
+    pub fn is_empty(&self) -> bool {
+        let filled = |s: &Option<String>| s.is_some();
+        self.country.is_none()
+            && !self.a.iter().any(filled)
+            && ![
+                &self.pre_modifier,
+                &self.pre_direction,
+                &self.road,
+                &self.street_suffix,
+                &self.post_direction,
+                &self.post_modifier,
+                &self.road_section,
+                &self.road_branch,
+                &self.road_sub_branch,
+                &self.house_number,
+                &self.house_number_suffix,
+                &self.landmark,
+                &self.additional,
+                &self.floor,
+                &self.name,
+                &self.postal_code,
+                &self.building,
+                &self.unit,
+                &self.room,
+                &self.seat,
+                &self.place_type,
+                &self.postal_community,
+                &self.post_office_box,
+                &self.additional_code,
+            ]
+            .iter()
+            .any(|slot| filled(slot))
+    }
+
+    /// The `civicAddress` element, in RFC 5139 schema order.
+    fn to_xml(&self) -> String {
+        let mut out = String::from("<cac:civicAddress");
+        if let Some(lang) = &self.language {
+            out.push_str(&format!(" xml:lang=\"{}\"", xml_escape(lang)));
+        }
+        out.push_str(">\n");
+
+        let element = |out: &mut String, name: &str, value: &Option<String>| {
+            if let Some(value) = value {
+                out.push_str(&format!(
+                    "          <cac:{name}>{}</cac:{name}>\n",
+                    xml_escape(value)
+                ));
+            }
+        };
+
+        element(&mut out, "country", &self.country);
+        for (i, value) in self.a.iter().enumerate() {
+            element(&mut out, &format!("A{}", i + 1), value);
+        }
+        element(&mut out, "PRM", &self.pre_modifier);
+        element(&mut out, "PRD", &self.pre_direction);
+        element(&mut out, "RD", &self.road);
+        element(&mut out, "STS", &self.street_suffix);
+        element(&mut out, "POD", &self.post_direction);
+        element(&mut out, "POM", &self.post_modifier);
+        element(&mut out, "RDSEC", &self.road_section);
+        element(&mut out, "RDBR", &self.road_branch);
+        element(&mut out, "RDSUBBR", &self.road_sub_branch);
+        element(&mut out, "HNO", &self.house_number);
+        element(&mut out, "HNS", &self.house_number_suffix);
+        element(&mut out, "LMK", &self.landmark);
+        element(&mut out, "LOC", &self.additional);
+        element(&mut out, "FLR", &self.floor);
+        element(&mut out, "NAM", &self.name);
+        element(&mut out, "PC", &self.postal_code);
+        element(&mut out, "BLD", &self.building);
+        element(&mut out, "UNIT", &self.unit);
+        element(&mut out, "ROOM", &self.room);
+        element(&mut out, "SEAT", &self.seat);
+        element(&mut out, "PLC", &self.place_type);
+        element(&mut out, "PCN", &self.postal_community);
+        element(&mut out, "POBOX", &self.post_office_box);
+        element(&mut out, "ADDCODE", &self.additional_code);
+
+        out.push_str("        </cac:civicAddress>\n");
+        out
+    }
+}
+
+/// A location the UE can convey: either a point or a civic address.
+///
+/// TS 24.229 does not care which — the `Geolocation` header points at the body
+/// part either way. Which one the UE has depends on the access network: GNSS gives a point, and a user-entered address (or the
+/// carrier's registered E911 address) gives a civic address.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Location {
+    /// A WGS-84 point (RFC 5491 §2.1).
+    Geodetic(Geolocation),
+    /// A civic address (RFC 5139). Boxed because a civic address carries
+    /// 26 optional strings and a point carries three numbers.
+    Civic(Box<CivicAddress>),
+}
+
+impl Location {
+    /// A geodetic location.
+    pub fn geodetic(location: Geolocation) -> Self {
+        Location::Geodetic(location)
+    }
+
+    /// A civic address.
+    pub fn civic(address: CivicAddress) -> Self {
+        Location::Civic(Box::new(address))
+    }
+
+    /// Render the PIDF document for this location.
+    pub fn to_pidf(&self, entity: &str) -> String {
+        match self {
+            Location::Geodetic(g) => g.to_pidf_lo(entity),
+            Location::Civic(c) => civic_pidf(c, entity),
+        }
+    }
+}
+
+/// Render a PIDF-LO carrying a civic address (RFC 4119 + RFC 5139).
+pub fn civic_pidf(address: &CivicAddress, entity: &str) -> String {
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<presence xmlns=\"urn:ietf:params:xml:ns:pidf\"",
+            " xmlns:gp=\"urn:ietf:params:xml:ns:pidf:geopriv10\"",
+            " xmlns:cac=\"{ns}\"",
+            " entity=\"{entity}\">\n",
+            "  <tuple id=\"loc1\">\n",
+            "    <status>\n",
+            "      <gp:geopriv>\n",
+            "        <gp:location-info>\n",
+            "{address}",
+            "        </gp:location-info>\n",
+            "        <gp:usage-rules/>\n",
+            "      </gp:geopriv>\n",
+            "    </status>\n",
+            "  </tuple>\n",
+            "</presence>\n"
+        ),
+        ns = CIVIC_NS,
+        entity = xml_escape(entity),
+        address = address.to_xml(),
+    )
+}
 /// [`location_publish`], taking the fix from a [`crate::location::LocationSource`].
 pub fn location_publish_from(
     dialog: &mut crate::Dialog,
@@ -238,6 +626,8 @@ pub enum EmergencyError {
     BodyEncoding,
     /// A multipart body could not be serialised.
     Multipart(sip::multipart::MultipartError),
+    /// An ISO 3166-1 country code was not two uppercase letters.
+    BadCountry(String),
 }
 
 impl core::fmt::Display for EmergencyError {
@@ -254,6 +644,9 @@ impl core::fmt::Display for EmergencyError {
             EmergencyError::BadIdentity(s) => write!(f, "bad emergency identity: {s}"),
             EmergencyError::BodyEncoding => f.write_str("emergency body was not UTF-8"),
             EmergencyError::Multipart(e) => write!(f, "multipart body: {e}"),
+            EmergencyError::BadCountry(c) => {
+                write!(f, "country {c:?} is not a two-letter ISO 3166-1 code")
+            }
         }
     }
 }
@@ -325,7 +718,7 @@ impl Geolocation {
                 "  </tuple>\n",
                 "</presence>\n"
             ),
-            entity = entity,
+            entity = xml_escape(entity),
             lat = self.latitude,
             lon = self.longitude,
             radius = radius,
@@ -384,7 +777,7 @@ pub struct EmergencyRequest {
     local_tag: String,
     call_id: String,
     cseq: u32,
-    geolocation: Option<Geolocation>,
+    location: Option<Location>,
     /// `P-Access-Network-Info` value, when the access network can describe
     /// itself (TS 24.229 §5.1.6.8.3 item 4).
     pani: Option<String>,
@@ -417,7 +810,7 @@ impl EmergencyRequest {
             local_tag: format!("emerg-{contact_port}"),
             call_id: format!("fungos-emergency-{contact_port}@{contact_host}"),
             cseq: 1,
-            geolocation: None,
+            location: None,
             pani: None,
             current_location_discovery: false,
             anonymous_instance: None,
@@ -428,7 +821,20 @@ impl EmergencyRequest {
 
     /// Attach the UE's location (RFC 4119 PIDF-LO body).
     pub fn with_geolocation(mut self, location: Geolocation) -> Self {
-        self.geolocation = Some(location);
+        self.location = Some(Location::Geodetic(location));
+        self
+    }
+
+    /// Attach a civic address instead of a point (RFC 5139).
+    ///
+    /// This is the case that matters on Wi-Fi calling: a user knows their
+    /// address, and there is often no GNSS fix indoors at all.
+    pub fn with_civic_address(mut self, address: CivicAddress) -> Self {
+        self.location = if address.is_empty() {
+            None
+        } else {
+            Some(Location::civic(address))
+        };
         self
     }
 
@@ -453,7 +859,7 @@ impl EmergencyRequest {
         mut self,
         source: &mut impl crate::location::LocationSource,
     ) -> Self {
-        self.geolocation = source.current();
+        self.location = source.current();
         self
     }
 
@@ -609,8 +1015,9 @@ impl EmergencyRequest {
         headers.push(Header::new("Priority", "emergency"));
 
         let pidf = self
-            .geolocation
-            .map(|l| l.to_pidf_lo(self.identity.uri()).into_bytes());
+            .location
+            .as_ref()
+            .map(|l| l.to_pidf(self.identity.uri()).into_bytes());
         let sdp = self.offer_sdp.clone().map(String::into_bytes);
 
         let body = match (pidf, sdp) {
@@ -1252,7 +1659,7 @@ mod tests {
         let request = location_publish(
             &mut dialog,
             "sip:001010000000001@ims.example",
-            Some(Geolocation::new(51.5, -0.12).unwrap()),
+            Some(Location::Geodetic(Geolocation::new(51.5, -0.12).unwrap())),
         );
         assert_eq!(request.method, Method::Publish);
         assert_eq!(dialog.cseq, before + 1);
@@ -1344,5 +1751,174 @@ mod location_source_tests {
         let body = String::from_utf8(publish.body).unwrap();
         assert!(body.contains("<presence"));
         assert!(!body.contains("location-info"));
+    }
+}
+
+#[cfg(test)]
+mod civic_tests {
+    use super::*;
+
+    fn address() -> CivicAddress {
+        CivicAddress::new()
+            .language("en-US")
+            .country("US")
+            .unwrap()
+            .area(1, "CA")
+            .area(3, "San Francisco")
+            .road("Market Street")
+            .house_number("123")
+            .postal_code("94103")
+    }
+
+    #[test]
+    fn a_civic_address_renders_in_schema_order() {
+        let xml = civic_pidf(&address(), "sip:alice@example.net");
+        // RFC 4119 envelope with the RFC 5139 namespace bound as `cac`.
+        assert!(xml.contains(&format!("xmlns:cac=\"{CIVIC_NS}\"")));
+        assert!(xml.contains("<cac:civicAddress xml:lang=\"en-US\">"));
+        // RFC 5139 §2 is an xs:sequence: country, A1, A3, RD, HNO, PC.
+        let order = [
+            "<cac:country>US</cac:country>",
+            "<cac:A1>CA</cac:A1>",
+            "<cac:A3>San Francisco</cac:A3>",
+            "<cac:RD>Market Street</cac:RD>",
+            "<cac:HNO>123</cac:HNO>",
+            "<cac:PC>94103</cac:PC>",
+        ];
+        let mut at = 0;
+        for fragment in order {
+            let found = xml[at..]
+                .find(fragment)
+                .unwrap_or_else(|| panic!("missing or out of order: {fragment}"));
+            at += found + fragment.len();
+        }
+    }
+
+    #[test]
+    fn unset_fields_are_omitted_not_emitted_empty() {
+        let xml = civic_pidf(&address(), "sip:alice@example.net");
+        assert!(!xml.contains("<cac:A2>"));
+        assert!(!xml.contains("<cac:LMK>"));
+        assert!(!xml.contains("<cac:BLD>"));
+    }
+
+    #[test]
+    fn text_is_xml_escaped_in_elements_and_attributes() {
+        let address = CivicAddress::new()
+            .country("US")
+            .unwrap()
+            .road("A & B <script>")
+            .additional("\"quoted\" 'single'");
+        let xml = civic_pidf(&address, "sip:alice&bob@example.net");
+        // The street name cannot break out of its element...
+        assert!(xml.contains("<cac:RD>A &amp; B &lt;script&gt;</cac:RD>"));
+        assert!(xml.contains("<cac:LOC>&quot;quoted&quot; &apos;single&apos;</cac:LOC>"));
+        // ...and an entity with `&` cannot break the attribute.
+        assert!(xml.contains("entity=\"sip:alice&amp;bob@example.net\""));
+        assert!(!xml.contains("<script>"));
+    }
+
+    #[test]
+    fn a_whitespace_only_field_is_absent() {
+        let address = CivicAddress::new().country("US").unwrap().road("   ");
+        assert!(!address.is_empty());
+        let xml = civic_pidf(&address, "sip:a@example.net");
+        assert!(!xml.contains("<cac:RD>"));
+    }
+
+    #[test]
+    fn whitespace_is_collapsed_like_an_xs_token() {
+        let address = CivicAddress::new()
+            .country("US")
+            .unwrap()
+            .road("  123   Main   Street ");
+        let xml = civic_pidf(&address, "sip:a@example.net");
+        assert!(xml.contains("<cac:RD>123 Main Street</cac:RD>"));
+    }
+
+    #[test]
+    fn a_country_code_must_be_two_uppercase_letters() {
+        assert_eq!(
+            CivicAddress::new().country("us").unwrap_err(),
+            EmergencyError::BadCountry("us".into())
+        );
+        assert!(CivicAddress::new().country("USA").is_err());
+        assert!(CivicAddress::new().country("").is_err());
+    }
+
+    #[test]
+    fn an_empty_address_is_not_sent_at_all() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_civic_address(CivicAddress::new())
+            .invite()
+            .unwrap();
+        // Nothing to say means no Geolocation header (item 9), not an empty one.
+        assert_eq!(request.headers.get("geolocation"), None);
+        assert!(request.body.is_empty());
+    }
+
+    #[test]
+    fn a_civic_address_travels_in_the_location_body_part() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_civic_address(address())
+            .with_offer_sdp("v=0\r\n")
+            .invite()
+            .unwrap();
+        assert_eq!(
+            request.headers.get("content-type"),
+            Some("multipart/mixed; boundary=fungos-emergency")
+        );
+        assert_eq!(
+            request.headers.get("geolocation"),
+            Some("<cid:emergency-location@192.0.2.10>")
+        );
+        let body = String::from_utf8(request.body).unwrap();
+        assert!(body.contains("Content-ID: <emergency-location@192.0.2.10>"));
+        assert!(body.contains("<cac:civicAddress"));
+        assert!(body.contains("<cac:PC>94103</cac:PC>"));
+        assert!(body.contains("v=0"));
+    }
+
+    #[test]
+    fn a_civic_source_supplies_the_location() {
+        use crate::location::{FixedLocation, LocationSource};
+        let mut source = FixedLocation::civic(address());
+        assert_eq!(source.current(), Some(Location::civic(address())));
+
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_location_source(&mut source)
+            .invite()
+            .unwrap();
+        assert_eq!(
+            request.headers.get("geolocation"),
+            Some("<cid:emergency-location@192.0.2.10>")
+        );
+        assert!(String::from_utf8(request.body)
+            .unwrap()
+            .contains("<cac:civicAddress"));
+    }
+
+    #[test]
+    fn the_mid_call_publish_can_carry_a_civic_address() {
+        let mut dialog = crate::Dialog::new(
+            "call-1",
+            "sip:001010000000001@ims.example",
+            "sip:psap@ims.example",
+            "b",
+            "a",
+            "sip:001010000000001@192.0.2.10:5060",
+        );
+        dialog.confirm();
+        let publish = location_publish(
+            &mut dialog,
+            "sip:001010000000001@ims.example",
+            Some(Location::civic(address())),
+        );
+        let body = String::from_utf8(publish.body).unwrap();
+        assert!(body.contains("<cac:civicAddress"));
+        assert!(body.contains("<cac:HNO>123</cac:HNO>"));
     }
 }

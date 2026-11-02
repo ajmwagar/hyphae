@@ -3248,7 +3248,9 @@ fn e911_005_current_location_discovery_during_a_call() {
     let publish = location_publish(
         &mut dialog,
         "sip:001010000000001@ims.example",
-        Some(ims::emergency::Geolocation::new(51.5, -0.12).unwrap()),
+        Some(ims::emergency::Location::geodetic(
+            ims::emergency::Geolocation::new(51.5, -0.12).unwrap(),
+        )),
     );
     assert_eq!(publish.method, sip::Method::Publish);
     assert_eq!(publish.headers.get("event"), Some(LOCATION_EVENT_PACKAGE));
@@ -3308,4 +3310,57 @@ fn e911_006_a_location_source_cannot_produce_an_invented_fix() {
     );
     let body = String::from_utf8(request.body).unwrap();
     assert!(body.contains("<gml:pos>48.858400 2.294500</gml:pos>"));
+}
+
+// --- E911-008: civic address in the PIDF-LO -----------------------------
+
+#[test]
+fn e911_008_a_civic_address_is_conveyed_as_a_pidf_lo() {
+    use ims::emergency::{CivicAddress, EmergencyIdentity, EmergencyRequest, SosService, CIVIC_NS};
+
+    // The common Wi-Fi calling case: no GNSS fix indoors, but the user knows
+    // their address.
+    let address = CivicAddress::new()
+        .language("en-US")
+        .country("US")
+        .unwrap()
+        .area(1, "CA")
+        .area(3, "San Francisco")
+        .road("Market Street")
+        .house_number("123")
+        .postal_code("94103");
+
+    let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+    let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+        .with_civic_address(address)
+        .with_offer_sdp("v=0\r\n")
+        .invite()
+        .unwrap();
+
+    // RFC 6442 names the body part; TS 24.229 §5.1.6.8.3 item 7 is satisfied by
+    // a PIDF-LO whether it carries a point or an address.
+    assert_eq!(
+        request.headers.get("geolocation"),
+        Some("<cid:emergency-location@192.0.2.10>")
+    );
+    assert_eq!(request.headers.get("geolocation-routing"), Some("yes"));
+    let body = String::from_utf8(request.body).unwrap();
+    assert!(body.contains(&format!("xmlns:cac=\"{CIVIC_NS}\"")));
+    assert!(body.contains("<cac:civicAddress xml:lang=\"en-US\">"));
+    assert!(body.contains("<cac:country>US</cac:country>"));
+    assert!(body.contains("<cac:A3>San Francisco</cac:A3>"));
+    assert!(body.contains("<cac:HNO>123</cac:HNO>"));
+    // The media offer is still there.
+    assert!(body.contains("v=0"));
+
+    // A street name is text a person typed, so it must not be able to break out
+    // of its element.
+    let hostile = CivicAddress::new()
+        .country("US")
+        .unwrap()
+        .road("A & B <script>alert(1)</script>");
+    let xml = ims::emergency::civic_pidf(&hostile, "sip:a&b@example.net");
+    assert!(xml.contains("&amp;"));
+    assert!(!xml.contains("<script>"));
+    assert!(xml.contains("entity=\"sip:a&amp;b@example.net\""));
 }

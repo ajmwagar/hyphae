@@ -19,7 +19,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::emergency::Geolocation;
+use crate::emergency::{Geolocation, Location};
 
 /// A source of the UE's current location.
 pub trait LocationSource {
@@ -27,20 +27,25 @@ pub trait LocationSource {
     ///
     /// Returning `None` is always safe. Returning a stale or invented fix is
     /// not: an emergency service will act on it.
-    fn current(&mut self) -> Option<Geolocation>;
+    fn current(&mut self) -> Option<Location>;
 }
 
 /// A source that always reports the same answer.
 ///
 /// This is for tests and for callers that already hold a fix from somewhere
 /// else (for example the access point's position, configured by hand).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct FixedLocation(pub Option<Geolocation>);
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FixedLocation(pub Option<Location>);
 
 impl FixedLocation {
-    /// A source with a fix.
+    /// A source with a geodetic fix.
     pub fn at(location: Geolocation) -> Self {
-        Self(Some(location))
+        Self(Some(Location::Geodetic(location)))
+    }
+
+    /// A source with a civic address (RFC 5139).
+    pub fn civic(address: crate::emergency::CivicAddress) -> Self {
+        Self(Some(Location::civic(address)))
     }
 
     /// A source with no fix — the honest answer when nothing has been acquired.
@@ -50,13 +55,13 @@ impl FixedLocation {
 }
 
 impl LocationSource for FixedLocation {
-    fn current(&mut self) -> Option<Geolocation> {
-        self.0
+    fn current(&mut self) -> Option<Location> {
+        self.0.clone()
     }
 }
 
 impl<T: LocationSource + ?Sized> LocationSource for &mut T {
-    fn current(&mut self) -> Option<Geolocation> {
+    fn current(&mut self) -> Option<Location> {
         (**self).current()
     }
 }
@@ -69,7 +74,7 @@ mod tests {
     fn a_fixed_source_reports_what_it_was_given() {
         let location = Geolocation::new(51.5, -0.12).unwrap();
         let mut source = FixedLocation::at(location);
-        assert_eq!(source.current(), Some(location));
+        assert_eq!(source.current(), Some(Location::Geodetic(location)));
 
         let mut none = FixedLocation::unavailable();
         assert_eq!(none.current(), None);
@@ -80,6 +85,9 @@ mod tests {
         let location = Geolocation::new(0.0, 0.0).unwrap();
         let mut inner = FixedLocation::at(location);
         let mut by_ref = &mut inner;
-        assert_eq!(LocationSource::current(&mut by_ref), Some(location));
+        assert_eq!(
+            LocationSource::current(&mut by_ref),
+            Some(Location::Geodetic(location))
+        );
     }
 }
