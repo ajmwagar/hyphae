@@ -2633,3 +2633,40 @@ fn epdg_012_s2b_tunnel_program_installs_both_directions() {
     assert_eq!(teardown[0], "ip route del 10.32.0.0/24 dev ipsec0");
     assert_eq!(teardown.last().unwrap(), "ip link delete ipsec0");
 }
+
+// --- EPDG-017: ePDG discovery names -------------------------------------
+
+#[test]
+fn epdg_017_discovery_fqdns_match_the_specification_examples() {
+    use epdg::discovery::{
+        epdg_fqdn, epdg_fqdn_5gs_tai, epdg_fqdn_lac, epdg_fqdn_tai, visited_country_fqdn, PlmnId,
+    };
+
+    // TS 23.003 uses MCC 345 / MNC 12 throughout its examples.
+    let plmn = PlmnId::new("345", "12").unwrap();
+
+    assert_eq!(
+        epdg_fqdn(&plmn),
+        "epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        epdg_fqdn_tai(&plmn, 0x0B21),
+        "tac-lb21.tac-hb0b.tac.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        epdg_fqdn_lac(&plmn, 0x0B21),
+        "lac0b21.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        epdg_fqdn_5gs_tai(&plmn, 0x0B1A21),
+        "tac-lb21.tac-mb1a.tac-hb0b.5gstac.epdg.epc.mnc012.mcc345.pub.3gppnetwork.org"
+    );
+    assert_eq!(
+        visited_country_fqdn("345").unwrap(),
+        "epdg.epc.mcc345.visited-country.pub.3gppnetwork.org"
+    );
+
+    // A three-digit MNC is not padded again.
+    let us = PlmnId::new("310", "260").unwrap();
+    assert_eq!(epdg_fqdn(&us), "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org");
+}

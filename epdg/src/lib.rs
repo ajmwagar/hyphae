@@ -30,6 +30,7 @@ pub mod auth;
 pub mod child;
 pub mod cp;
 pub mod dh;
+pub mod discovery;
 pub mod eap;
 pub mod ike_auth;
 pub mod ikev2;
@@ -42,6 +43,10 @@ pub use auth::{
 };
 pub use child::{ChildDirection, ChildEncryption, ChildError, ChildIntegrity, ChildSa};
 pub use cp::{ConfigAttribute, ConfigPayload};
+pub use discovery::{
+    epdg_fqdn, epdg_fqdn_5gs_tai, epdg_fqdn_lac, epdg_fqdn_tai, visited_country_fqdn,
+    DiscoveryError, PlmnId,
+};
 pub use eap::{AkaPrimePeer, EapPacket, EapPeerError};
 pub use ike_auth::{AuthError, AuthStep, IkeAuthInitiator};
 pub use ikev2::{ExchangeType, Header, IkeError, Message, Payload, PayloadType};
