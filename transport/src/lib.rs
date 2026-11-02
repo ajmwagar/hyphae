@@ -22,6 +22,7 @@
 
 pub mod ccci;
 pub mod esp;
+pub mod ipsec;
 pub mod mbim;
 pub mod modem;
 pub mod net;

@@ -101,7 +101,38 @@ INVITE as pure messages. It never transmits: the CLI `emergency` subcommand
 only accepts the mock transport, refuses `udp`/`tcp`, and prints the request.
 Live emergency calling is a regulated product gate, not a test feature.
 
-## 5. ARM-first targets
+## 5. Security plane (Gm IPsec)
+
+IMS does **not** run IKE on Gm. During registration the UE offers its IPsec
+parameters in `Security-Client`; the P-CSCF answers with `Security-Server`; both
+sides already hold the same `CK`/`IK` from IMS-AKA, so the SAs are programmed
+directly (TS 33.203 §7, RFC 3329).
+
+```text
+  usim/aka ── CK/IK ──┐
+                      ▼
+  Security-Client/Server ──► transport::ipsec::IpsecAgreement
+                                    │  outbound SA (spi-c), inbound SA (spi-s)
+                                    ▼
+                    transport::esp  (HMAC-MD5-96 / HMAC-SHA-1-96, null enc)
+                                    │
+                    Linux:  ip xfrm state|policy  (kernel ESP data path)
+                    macOS:  no XFRM — needs an out-of-tree userspace data path
+```
+
+* `transport::esp` is a real codec: 96-bit ICV, null encryption, ESP padding,
+  and a 64-packet anti-replay window (RFC 4303 §3.4.3).
+* `transport::ipsec` parses the `Security-*` parameters, builds the SA pair from
+  `CK`/`IK`, and renders `ip xfrm` commands. `XfrmProgram::apply()` is Linux-only
+  and needs `CAP_NET_ADMIN`.
+* On macOS there is no XFRM; the kernel does not take these SAs. The codec and
+  negotiation still run, but a live SA needs an out-of-tree userspace ESP data
+  path (utun/raw sockets) or a Linux VM/container.
+
+The modem is not involved: it only provides the IP bearer. SAs bind to that
+PDN interface and its addresses.
+
+## 6. ARM-first targets
 
 First devices are 32-bit ARM (TCL 4058G, armv7l) and 64-bit ARM (CAT S22
 msm8937 hardware, mainline aarch64). Therefore:

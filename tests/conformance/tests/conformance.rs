@@ -1606,3 +1606,79 @@ fn sdp_003_second_media_line_is_rejected_not_dropped() {
     assert_eq!(answer.media[1].port, 0);
     assert_eq!(answer.rejected_media().count(), 1);
 }
+
+// --- SEC-003: authenticated ESP (TS 33.203 §7, RFC 2403/2404) -------------
+
+#[test]
+fn sec_003_esp_authenticates_frames_and_rejects_replay() {
+    use transport::esp::{EspError, EspIntegrity, EspSa, NEXT_HDR_UDP};
+
+    // IK from IMS-AKA; null encryption is the mandatory profile.
+    let ik = [0x2b; 16];
+    let mut out = EspSa::new(0x2710, EspIntegrity::HmacMd5_96, &ik, &[]).unwrap();
+    let mut inbound = EspSa::new(0x2710, EspIntegrity::HmacMd5_96, &ik, &[]).unwrap();
+
+    let frame = out.encapsulate(b"REGISTER sip:ims SIP/2.0", NEXT_HDR_UDP);
+    let packet = inbound.decapsulate(&frame).unwrap();
+    assert_eq!(packet.payload, b"REGISTER sip:ims SIP/2.0");
+    assert_eq!(packet.seq, 1);
+
+    // Replay of the same sequence is rejected.
+    assert_eq!(inbound.decapsulate(&frame), Err(EspError::Replay(1)));
+
+    // Any bit flip in the protected region breaks the ICV.
+    let mut tampered = out.encapsulate(b"tampered", NEXT_HDR_UDP);
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    assert_eq!(inbound.decapsulate(&tampered), Err(EspError::BadIcv));
+
+    // HMAC-SHA-1-96 is the other TS 33.203 integrity algorithm.
+    let mut out = EspSa::new(0x2711, EspIntegrity::HmacSha1_96, &ik, &[]).unwrap();
+    let mut inbound = EspSa::new(0x2711, EspIntegrity::HmacSha1_96, &ik, &[]).unwrap();
+    let frame = out.encapsulate(b"sha1", NEXT_HDR_UDP);
+    assert_eq!(inbound.decapsulate(&frame).unwrap().payload, b"sha1");
+    assert_eq!(
+        EspIntegrity::from_ims("hmac-md5-96"),
+        Some(EspIntegrity::HmacMd5_96)
+    );
+}
+
+// --- SEC-004: SA negotiation and XFRM programming -------------------------
+
+#[test]
+fn sec_004_negotiates_sas_and_renders_xfrm_commands() {
+    use transport::ipsec::{IpsecAgreement, SecurityParams, XfrmProgram};
+
+    let client = SecurityParams::parse(
+        "algorithm=hmac-md5-96;ealg=null;prot=esp;mod=trans;spi-c=10000;spi-s=10001;port-c=5062;port-s=5064",
+    )
+    .unwrap();
+    let server = SecurityParams::parse(
+        "algorithm=hmac-md5-96;ealg=null;prot=esp;mod=trans;spi-c=10000;spi-s=10001;port-c=5062;port-s=5064",
+    )
+    .unwrap();
+    // CK/IK are what the USIM's AUTHENTICATE produced.
+    let ck = [0x11u8; 16];
+    let ik = [0x22u8; 16];
+    let agreement =
+        IpsecAgreement::negotiate(&client, &server, &ck, &ik, "10.32.0.2", "10.32.0.1").unwrap();
+    assert_eq!(agreement.outbound_spi(), 10000);
+    assert_eq!(agreement.inbound_spi(), 10001);
+
+    // Two SAs and two policies, exactly as `ip xfrm` expects.
+    let program = XfrmProgram::build(&agreement);
+    let rendered = program.render();
+    assert_eq!(rendered.len(), 4);
+    assert!(rendered[0].contains("state add src 10.32.0.2 dst 10.32.0.1"));
+    assert!(rendered[0].contains("auth hmac(md5) 0x22222222222222222222222222222222"));
+    assert!(rendered[1].contains("spi 0x2711"));
+    assert!(rendered[2].contains("policy add dir out"));
+    assert!(rendered[3].contains("policy add dir in"));
+
+    // Kernel programming is Linux-only; elsewhere it reports so, not panics.
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(
+        program.apply(),
+        Err(transport::ipsec::IpsecError::PlatformUnsupported)
+    );
+}
