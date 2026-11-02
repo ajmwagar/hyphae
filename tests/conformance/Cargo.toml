@@ -16,3 +16,4 @@ codec-amr.workspace = true
 evs.workspace = true
 media.workspace = true
 transport.workspace = true
+usim.workspace = true

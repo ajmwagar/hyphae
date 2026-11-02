@@ -55,6 +55,7 @@ codec-amr/  RFC 4867 payload format + optional AMR-WB FFI (separate package)
 evs/        TS 26.445 appendix A EVS RTP payload format (Header-Full); no codec
 media/      RTP/RTCP framing (RFC 3550), jitter buffer and PLC around codec-amr
 transport/  Transport trait: mock, UDP/TCP, ESP, AT/QMI + MBIM PDN, CCCI boundary
+usim/       TS 31.102 AUTHENTICATE APDU + card boundary; Milenage software USIM
 tests/      conformance harness + golden fixtures with spec citations
 lab/        docker-compose plan for Open5GS + Kamailio IMS + USIM
 docs/       specs matrix, architecture, ARM targets, references, facts
@@ -66,7 +67,7 @@ The protocol crates never start a thread, open a socket, or link a codec.
 
 ```sh
 cargo check --workspace
-cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p evs -p media -p transport -p conformance
+cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p evs -p media -p transport -p usim -p conformance
 cargo run -p ims --example register_flow
 cargo run -p ims --example call_flow
 ```

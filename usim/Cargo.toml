@@ -1,0 +1,10 @@
+[package]
+name = "usim"
+description = "USIM AKA adapter: TS 31.102 AUTHENTICATE APDU codec, card boundary, software USIM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aka.workspace = true

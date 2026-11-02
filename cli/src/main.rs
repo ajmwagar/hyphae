@@ -902,10 +902,20 @@ fn resolve_res(opts: &Options, response: &Response) -> Result<[u8; 8], String> {
         if !check.mac_valid {
             return Err("AUTN MAC-A verification failed; check K/OPc and RAND".into());
         }
-        let mut amf = [0u8; 2];
-        amf.copy_from_slice(&autn[6..8]);
-        let out = milenage.compute(&rand, &check.sqn, &amf);
-        return Ok(out.res);
+        // Route the challenge through the USIM boundary (TS 31.102) rather than
+        // calling Milenage directly: the software USIM IS the lab card here.
+        use usim::Usim as _;
+        let mut card = usim::SoftwareUsim::with_opc(k, opc, check.sqn);
+        match card.authenticate(&rand, &autn).map_err(|e| e.to_string())? {
+            usim::AkaOutput::Success { res, .. } => {
+                let mut out = [0u8; 8];
+                out.copy_from_slice(&res[..8]);
+                return Ok(out);
+            }
+            usim::AkaOutput::SyncFailure { .. } => {
+                return Err("USIM reported a synchronisation failure (AUTS)".into());
+            }
+        }
     }
     Err(
         "no lab RES available: pass --res-hex (or env HYPPHAE_RES_HEX), or --k-hex and --opc-hex"
