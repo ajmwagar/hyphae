@@ -23,6 +23,7 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | AKA-003 | Milenage AES-128 primitive matches FIPS-197 | FIPS-197 Appendix C.1 | `fips197_vector` | aka |
 | SDP-001 | AMR-WB offer has rtpmap, octet-align, mode-set, ptime | RFC 4566; RFC 4867 §8; 3GPP TS 26.114 §5.2.1 | `sdp_001_amr_wb_offer` | ims |
 | SDP-002 | Answer selects AMR-WB and echoes the offered parameters | RFC 3264 §6; 3GPP TS 26.114 §5.2.1 | `sdp_002_offer_answer_selects_amr_wb` | ims |
+| SDP-003 | Multiple media lines: accepted audio plus every unaccepted `m=` line returned with port 0 | RFC 3264 §6.2 | `sdp_003_second_media_line_is_rejected_not_dropped` | ims, conformance |
 | RTP-001 | RFC 4867 octet-aligned payload round-trips, CMR/ToC/F/FT/Q/P | RFC 4867 §3.3, §4.1 | `rtp_001_rfc4867_octet_aligned_round_trip`, `golden_multi_frame_f_bit` | codec-amr |
 | RTP-002 | Speech/SID/no-data/lost frame classification | RFC 4867 §4.2, §4.3 | `sid_no_data_and_lost_classification`, `all_wb_modes_round_trip` | codec-amr |
 | RTP-003 | Bandwidth-efficient and storage modes are rejected, not guessed | RFC 4867 §3.4 | `bandwidth_efficient_is_explicitly_unsupported` | codec-amr |
@@ -37,9 +38,11 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | REG-011 | Multiple contacts for one IMPU are all carried in a single REGISTER | RFC 3261 §10.2 | `reg_011_multiple_contacts_third_party_and_pcscf_failover` | ims, conformance |
 | REG-012 | Third-party registration: `To` is the address-of-record being registered, `From` stays the registrant | RFC 3261 §10.3; 3GPP TS 24.229 §5.1.1.2 | `reg_011_multiple_contacts_third_party_and_pcscf_failover` | ims, conformance |
 | REG-013 | P-CSCF failover walks the configured candidate list once, then stops | RFC 3261 §18.1 | `reg_011_multiple_contacts_third_party_and_pcscf_failover` | ims, conformance |
+| KEEP-001 | Out-of-dialog OPTIONS keepalive: due/interval accounting, well-formed ping, consecutive-failure tracking with a dead threshold | RFC 3261 §11; 3GPP TS 24.229 §5.1.2.2 | `keep_001_options_ping_and_failure_accounting` | ims, conformance |
 | INV-001 | INVITE/183/PRACK/200/ACK full session establishment | RFC 3261 §13; RFC 3262; 3GPP TS 24.229 §5.1.3 | `inv_001_full_call_establishment`, `inv_001_busy_returns_failed_and_blocks_bye` | ims |
 | INV-002 | Preconditions and `100rel` SDP answer handling | RFC 3312; 3GPP TS 24.229 §5.1.3 | `inv_002_preconditions_offered_and_answered`, `parses_rfc3312_preconditions` | ims |
 | INV-003 | Outgoing CANCEL reuses the INVITE branch and CSeq number; 200 to CANCEL + 487 to INVITE ends the attempt | RFC 3261 §9.1, §9.2 | `inv_003_cancel_reuses_the_invite_transaction` | ims, conformance |
+| INV-004 | Forked INVITE: every additional 2xx is ACKed and BYE-ed while the first dialog stays active | RFC 3261 §13.2.2.4 | `inv_004_a_forked_2xx_is_acked_then_bye_d` | ims, conformance |
 | UAS-001 | Incoming call (UAS): INVITE builds the callee dialog, 180 Ringing with RSeq under 100rel, 200 OK with the SDP answer, ACK confirms, BYE/CANCEL teardown | RFC 3261 §12.1.1, §13.3, §9.2; RFC 3262 §3; RFC 3264 | `uas_001_incoming_call_rings_and_answers_and_tears_down`, `uas_001_cancel_answers_200_and_487` | ims, conformance |
 | UAS-002 | Received re-INVITE and in-dialog UPDATE carrying an offer are answered with a mirrored SDP answer (sendonly offer -> recvonly answer); ACK keeps the dialog confirmed | RFC 3261 §14.1; RFC 3264 §6.1, §6.2 | `uas_002_reinvite_and_update_renegotiate_hold` | ims, conformance |
 | SMS-001 | SMS over IMS (RP/CP and SIP MESSAGE) | 3GPP TS 24.341; GSMA IR.92 §5 | `sms_001_sip_message_carries_rp_data`, `pdu_round_trips_destination_and_text` | ims |

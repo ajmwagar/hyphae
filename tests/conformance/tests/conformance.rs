@@ -1492,3 +1492,117 @@ fn reg_011_multiple_contacts_third_party_and_pcscf_failover() {
     assert_eq!(reg.next_p_cscf().as_deref(), Some("pcscf2:5060"));
     assert_eq!(reg.next_p_cscf(), None);
 }
+
+// --- KEEP-001: OPTIONS keepalive ------------------------------------------
+
+#[test]
+fn keep_001_options_ping_and_failure_accounting() {
+    use ims::{Keepalive, KeepaliveStatus};
+    use std::time::{Duration, Instant};
+
+    let mut ka = Keepalive::new(ims::ImsProfile::lab_default())
+        .with_interval(Duration::from_secs(10))
+        .with_max_failures(2);
+    let t0 = Instant::now();
+
+    // The first ping is due immediately and is a well-formed OPTIONS.
+    assert!(ka.due(t0));
+    let ping = ka.ping("sip:pcscf.ims.example", t0);
+    assert_eq!(ping.method, sip::Method::Options);
+    assert_eq!(ping.headers.get("cseq"), Some("1 OPTIONS"));
+    assert!(ping
+        .headers
+        .get("via")
+        .unwrap()
+        .contains("branch=z9hG4bK-fungos-ka-"));
+    assert_eq!(ping.headers.get("content-length"), Some("0"));
+
+    // Not due again until the interval elapses.
+    assert!(!ka.due(t0 + Duration::from_secs(5)));
+    assert!(ka.due(t0 + Duration::from_secs(10)));
+
+    // Failures accumulate to Dead, and a 2xx resets them.
+    let ok = sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers: sip::Headers::new(),
+        body: Vec::new(),
+    };
+    assert_eq!(ka.on_timeout(), KeepaliveStatus::Unhealthy(408));
+    assert_eq!(ka.on_response(&ok), KeepaliveStatus::Alive);
+    assert_eq!(ka.failures(), 0);
+    assert_eq!(ka.on_timeout(), KeepaliveStatus::Unhealthy(408));
+    assert_eq!(ka.on_timeout(), KeepaliveStatus::Dead);
+    assert!(ka.is_dead());
+}
+
+// --- INV-004: forked INVITE (multiple 2xx) --------------------------------
+
+#[test]
+fn inv_004_a_forked_2xx_is_acked_then_bye_d() {
+    use ims::{Call, CallEvent, ImsProfile};
+
+    let mut call = Call::new(ImsProfile::lab_default(), "sip:b@ims.example");
+    let _ = call.invite();
+
+    let mut first = sip::Headers::new();
+    first.push(sip::Header::new("CSeq", "1 INVITE"));
+    first.push(sip::Header::new("To", "<sip:b@ims.example>;tag=branch-a"));
+    first.push(sip::Header::new("Contact", "<sip:b@10.0.0.1:5060>"));
+    let ok = sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers: first,
+        body: Vec::new(),
+    };
+    assert!(matches!(
+        call.on_response(&ok),
+        CallEvent::Established { .. }
+    ));
+
+    // A second 200 for the same INVITE forks: ACK it, then BYE that branch.
+    let mut second = sip::Headers::new();
+    second.push(sip::Header::new("CSeq", "1 INVITE"));
+    second.push(sip::Header::new("To", "<sip:b@ims.example>;tag=branch-b"));
+    second.push(sip::Header::new("Contact", "<sip:b@10.0.0.2:5060>"));
+    let fork = sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers: second,
+        body: Vec::new(),
+    };
+    match call.on_response(&fork) {
+        CallEvent::Forked { ack, bye } => {
+            assert_eq!(ack.method, sip::Method::Ack);
+            assert_eq!(bye.method, sip::Method::Bye);
+            assert!(ack.headers.get("to").unwrap().contains("branch-b"));
+            assert!(bye.headers.get("to").unwrap().contains("branch-b"));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    // The first dialog remains the active one.
+    assert!(call.is_established());
+}
+
+// --- SDP-003: second media line -------------------------------------------
+
+#[test]
+fn sdp_003_second_media_line_is_rejected_not_dropped() {
+    use ims::sdp::Attribute;
+    use ims::Sdp;
+
+    let mut offer = Sdp::amr_wb_offer(&[0, 1, 2], true, "192.0.2.20");
+    offer.add_media_line(
+        "video",
+        49174,
+        "RTP/AVP",
+        &["96"],
+        vec![Attribute::new("rtpmap", Some("96 H264/90000"))],
+    );
+    let answer = Sdp::answer_amr_wb(&offer, "192.0.2.11").unwrap();
+    assert_eq!(answer.media.len(), 2);
+    assert_ne!(answer.media[0].port, 0);
+    // RFC 3264 §6.2: unaccepted media lines are returned with port 0.
+    assert_eq!(answer.media[1].port, 0);
+    assert_eq!(answer.rejected_media().count(), 1);
+}

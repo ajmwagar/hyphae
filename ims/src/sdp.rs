@@ -576,6 +576,37 @@ impl Sdp {
         if let Some(evt) = media.payload_type("telephone-event", 16_000) {
             formats.push(evt.to_string());
         }
+        let mut accepted = Media {
+            kind: "audio".into(),
+            port: 49_172,
+            protocol: "RTP/AVP".into(),
+            formats,
+            connection: Some(Connection::ip4(local_address)),
+            bandwidths: Vec::new(),
+            attributes,
+            other: Vec::new(),
+        };
+        if let Some(p) = precond {
+            p.push_to(&mut accepted);
+        }
+        // RFC 3264 §6.2: every offered media line the answer does not accept is
+        // returned with port 0 so the offer/answer is still complete.
+        let mut media_lines = vec![accepted];
+        for offered in &offer.media {
+            if core::ptr::eq(offered, media) {
+                continue;
+            }
+            media_lines.push(Media {
+                kind: offered.kind.clone(),
+                port: 0,
+                protocol: offered.protocol.clone(),
+                formats: offered.formats.clone(),
+                connection: Some(Connection::ip4(local_address)),
+                bandwidths: Vec::new(),
+                attributes: Vec::new(),
+                other: Vec::new(),
+            });
+        }
         Ok(Sdp {
             origin: Origin {
                 username: "-".into(),
@@ -590,24 +621,37 @@ impl Sdp {
             connection: Some(Connection::ip4(local_address)),
             bandwidths: Vec::new(),
             attributes: Vec::new(),
-            media: vec![{
-                let mut answer_media = Media {
-                    kind: "audio".into(),
-                    port: 49_172,
-                    protocol: "RTP/AVP".into(),
-                    formats,
-                    connection: Some(Connection::ip4(local_address)),
-                    bandwidths: Vec::new(),
-                    attributes,
-                    other: Vec::new(),
-                };
-                if let Some(p) = precond {
-                    p.push_to(&mut answer_media);
-                }
-                answer_media
-            }],
+            media: media_lines,
             other: Vec::new(),
         })
+    }
+
+    /// Append a media line to an offer (e.g. a second `m=` for a secondary
+    /// stream). No codec is implemented for it here; this is SDP text.
+    pub fn add_media_line(
+        &mut self,
+        kind: &str,
+        port: u16,
+        protocol: &str,
+        formats: &[&str],
+        attributes: Vec<Attribute>,
+    ) -> &mut Media {
+        self.media.push(Media {
+            kind: kind.into(),
+            port,
+            protocol: protocol.into(),
+            formats: formats.iter().map(|f| (*f).to_string()).collect(),
+            connection: None,
+            bandwidths: Vec::new(),
+            attributes,
+            other: Vec::new(),
+        });
+        self.media.last_mut().unwrap()
+    }
+
+    /// The media lines the answer rejected (port 0).
+    pub fn rejected_media(&self) -> impl Iterator<Item = &Media> {
+        self.media.iter().filter(|m| m.port == 0)
     }
 
     /// Add RFC 3312 media preconditions (`sendrecv`) to every media line.
@@ -860,5 +904,29 @@ a=confirmed:sendrecv\r\n";
             parsed.audio().unwrap().attribute("confirmed"),
             Some("sendrecv")
         );
+    }
+
+    #[test]
+    fn second_media_line_is_rejected_with_port_zero() {
+        // An offer with audio + a secondary media line.
+        let mut offer = Sdp::amr_wb_offer(&[0, 1, 2], true, "192.0.2.20");
+        offer.add_media_line(
+            "video",
+            49174,
+            "RTP/AVP",
+            &["96"],
+            vec![Attribute::new("rtpmap", Some("96 H264/90000"))],
+        );
+        let answer = Sdp::answer_amr_wb(&offer, "192.0.2.11").unwrap();
+        assert_eq!(answer.media.len(), 2);
+        // Audio accepted, video rejected (RFC 3264 §6.2).
+        assert_eq!(answer.media[0].kind, "audio");
+        assert_ne!(answer.media[0].port, 0);
+        assert_eq!(answer.media[1].kind, "video");
+        assert_eq!(answer.media[1].port, 0);
+        assert_eq!(answer.rejected_media().count(), 1);
+        // The answer still parses as SDP after serialisation.
+        let reparsed = Sdp::parse(&answer.to_text()).unwrap();
+        assert_eq!(reparsed.media.len(), 2);
     }
 }
