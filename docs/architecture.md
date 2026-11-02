@@ -96,6 +96,11 @@ patent-noticed packages or device-local retrofit services. See
 Transport adapters own platform failure, retries and MTU behaviour. They must
 not parse or rewrite SIP semantics; they move `sip::Message` bytes.
 
+**Emergency (E911).** `ims::emergency` builds the TS 24.229 §5.1.6.3 emergency
+INVITE as pure messages. It never transmits: the CLI `emergency` subcommand
+only accepts the mock transport, refuses `udp`/`tcp`, and prints the request.
+Live emergency calling is a regulated product gate, not a test feature.
+
 ## 5. ARM-first targets
 
 First devices are 32-bit ARM (TCL 4058G, armv7l) and 64-bit ARM (CAT S22

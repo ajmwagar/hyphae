@@ -898,3 +898,73 @@ fn trn_003_mbim_frame_and_session_round_trip() {
     a.send(&sent).unwrap();
     assert_eq!(b.recv(Duration::from_millis(100)).unwrap().unwrap(), sent);
 }
+
+// --- E911-001: emergency session identity and routing ---------------------
+
+#[test]
+fn e911_001_emergency_invite_targets_the_service_urn() {
+    use ims::emergency::{EmergencyIdentity, EmergencyRequest, SosService};
+
+    // RFC 5031 service URNs for the sos subtree parse and are recognised.
+    assert_eq!(
+        SosService::parse("urn:service:sos").unwrap(),
+        SosService::Sos
+    );
+    assert_eq!(
+        SosService::parse("urn:service:sos.police").unwrap(),
+        SosService::Police
+    );
+    assert!(SosService::is_emergency_urn("urn:service:sos.fire"));
+    assert!(!SosService::is_emergency_urn("sip:911@example.net"));
+
+    // An unregistered UE derives a temporary identity from the IMSI.
+    let id = EmergencyIdentity::temporary_from_imsi(
+        "001010000000001",
+        "ims.mnc001.mcc001.3gppnetwork.org",
+    );
+    assert!(id.is_temporary());
+
+    // TS 24.229 §5.1.6.3: Request-URI is the service URN and the request
+    // carries Resource-Priority: esnet.0.
+    let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+        .invite()
+        .unwrap();
+    assert_eq!(request.method, sip::Method::Invite);
+    assert_eq!(request.uri, "urn:service:sos");
+    assert_eq!(request.headers.get("resource-priority"), Some("esnet.0"));
+    assert!(request
+        .headers
+        .get("to")
+        .unwrap()
+        .contains("urn:service:sos"));
+}
+
+#[test]
+fn e911_001_geolocation_is_routed_as_pidf_lo() {
+    use ims::emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
+
+    // Out-of-range coordinates are rejected, not clamped.
+    assert!(Geolocation::new(90.1, 0.0).is_err());
+    assert!(Geolocation::new(0.0, -180.1).is_err());
+
+    let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+    let location = Geolocation::new(48.8584, 2.2945).unwrap().with_radius(50.0);
+    let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+        .with_geolocation(location)
+        .invite()
+        .unwrap();
+
+    // RFC 6442: the location is eligible for routing.
+    assert_eq!(request.headers.get("geolocation-routing"), Some("yes"));
+    assert_eq!(
+        request.headers.get("content-type"),
+        Some("application/pidf+xml")
+    );
+    let body = String::from_utf8(request.body.clone()).unwrap();
+    assert!(body.contains("<gml:pos>48.858400 2.294500</gml:pos>"));
+    assert!(body.contains("urn:ogc:def:crs:EPSG::4326"));
+    assert_eq!(
+        request.headers.get("content-length"),
+        Some(request.body.len().to_string().as_str())
+    );
+}

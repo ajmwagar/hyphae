@@ -31,6 +31,8 @@ enum Command {
     Register,
     Deregister,
     ShowProfile,
+    /// Build and print an emergency INVITE (mock only; never transmitted).
+    Emergency,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,7 @@ struct RawArgs {
     k_hex: Option<String>,
     once: bool,
     verbose: bool,
+    urn: Option<String>,
     command: Option<Command>,
     help: bool,
 }
@@ -92,6 +95,7 @@ impl RawArgs {
             k_hex: over.k_hex.or(base.k_hex),
             once: base.once || over.once,
             verbose: base.verbose || over.verbose,
+            urn: over.urn.or(base.urn),
             command: over.command.or(base.command),
             help: base.help || over.help,
         }
@@ -110,6 +114,7 @@ struct Options {
     k_hex: Option<String>,
     once: bool,
     verbose: bool,
+    urn: String,
     command: Command,
 }
 
@@ -155,6 +160,7 @@ fn run() -> Result<(), String> {
             TransportKind::Mock => run_mock(&opts, true),
             _ => run_real(&opts, true),
         },
+        Command::Emergency => run_emergency(&opts),
     }
 }
 
@@ -205,6 +211,9 @@ fn build_options(raw: RawArgs) -> Result<Options, String> {
         k_hex,
         once: raw.once,
         verbose: raw.verbose,
+        urn: raw
+            .urn
+            .unwrap_or_else(|| ims::emergency::SOS_ROOT.to_string()),
         command,
     })
 }
@@ -234,10 +243,12 @@ fn parse_args(args: &[String]) -> Result<RawArgs, String> {
                 }
                 raw.once = true;
             }
+            "--urn" => raw.urn = Some(take_value(key, inline, args, &mut i)?),
             "--verbose" | "-v" => raw.verbose = true,
             "register" => set_command(&mut raw, Command::Register)?,
             "deregister" => set_command(&mut raw, Command::Deregister)?,
             "show-profile" => set_command(&mut raw, Command::ShowProfile)?,
+            "emergency" => set_command(&mut raw, Command::Emergency)?,
             other if other.starts_with('-') => {
                 return Err(format!("unknown option {other:?}; try --help"))
             }
@@ -467,6 +478,63 @@ fn show_profile(opts: &Options) -> Result<(), String> {
     if let Some(media) = offer.audio() {
         println!("  sdp amr-wb fmtp: {}", media.fmtp(116).unwrap_or(""));
     }
+    Ok(())
+}
+
+/// The emergency safety interlock: only the in-memory mock transport is
+/// permitted. Any real transport is refused before a request is even built.
+fn emergency_transport_allowed(kind: TransportKind) -> Result<(), String> {
+    match kind {
+        TransportKind::Mock => Ok(()),
+        TransportKind::Udp | TransportKind::Tcp => Err(format!(
+            "refusing to place a real emergency call over transport {:?}.\n\
+             The `emergency` subcommand is a lab-only request builder; it never \
+             transmits. Use --transport mock to print the INVITE.",
+            kind.as_str()
+        )),
+    }
+}
+
+/// Build and print an emergency INVITE — **never transmitted**.
+///
+/// This is a deliberate safety interlock. Emergency calling is regulated, and a
+/// debug binary must never reach a live PSAP. Therefore:
+///
+/// * only the in-memory mock transport is accepted; `udp`/`tcp` are refused
+///   outright, and
+/// * even on the mock transport the request is printed, not sent.
+fn run_emergency(opts: &Options) -> Result<(), String> {
+    emergency_transport_allowed(opts.transport)?;
+    let service = ims::emergency::SosService::parse(&opts.urn)
+        .map_err(|e| format!("{e} (expected e.g. {})", ims::emergency::SOS_ROOT))?;
+    let profile = build_ims_profile(opts)?;
+    let identity = ims::emergency::EmergencyIdentity::registered(profile.public_identity.clone())
+        .or_else(|_| {
+            Ok::<_, ims::emergency::EmergencyError>(
+                ims::emergency::EmergencyIdentity::temporary_from_imsi(
+                    &opts.imsi,
+                    &profile.home_domain,
+                ),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let request = ims::emergency::EmergencyRequest::new(
+        service,
+        identity,
+        &profile.contact_host,
+        profile.contact_port,
+    )
+    .with_service_route(profile.service_route.clone())
+    .with_offer_sdp(profile.amr_wb_offer(&profile.contact_host, true).to_text())
+    .invite()
+    .map_err(|e| e.to_string())?;
+
+    eprintln!(
+        "hyphae: NOT SENDING — emergency request is printed for inspection only (mock transport)"
+    );
+    let text =
+        String::from_utf8(sip::Message::Request(request).to_bytes()).map_err(|e| e.to_string())?;
+    print!("{text}");
     Ok(())
 }
 
@@ -944,7 +1012,7 @@ fn print_help() {
 hyphae — standalone IMS/VoLTE REGISTER client
 
 USAGE:
-    hyphae [OPTIONS] [register|deregister|show-profile]
+    hyphae [OPTIONS] [register|deregister|show-profile|emergency]
 
 OPTIONS:
     --profile <id|path>   Carrier profile id (e.g. 00101) or TOML path [default: 00101]
@@ -956,6 +1024,7 @@ OPTIONS:
     --res-hex <hex>       LAB ONLY: 8-byte AKA RES (16 hex chars)
     --opc-hex <hex>       LAB ONLY: OPc for RAND/AUTN derivation with --k-hex
     --k-hex <hex>         LAB ONLY: K for RAND/AUTN derivation with --opc-hex
+    --urn <urn>           LAB ONLY: emergency service URN [default: urn:service:sos]
     --once                One attempt; do not retry a timed-out REGISTER
     --verbose, -v         Print the SIP ladder to stdout
     --help, -h            This help
@@ -964,6 +1033,11 @@ ENVIRONMENT:
     HYPPHAE_RES_HEX       LAB ONLY fallback for --res-hex
     HYPPHAE_OPC_HEX       LAB ONLY fallback for --opc-hex
     HYPPHAE_K_HEX         LAB ONLY fallback for --k-hex
+
+EMERGENCY:
+    The `emergency` subcommand builds and prints an emergency INVITE (TS 24.229
+    §5.1.6) but NEVER transmits it, and only accepts --transport mock. Real
+    emergency calling is out of scope for this debug binary.
 
 EXIT STATUS:
     0 on a 2xx registration/deregistration or successful show-profile
@@ -978,6 +1052,30 @@ UDP/TCP mode is lab-only until a USIM/ISIM AKA adapter exists.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emergency_refuses_every_real_transport() {
+        assert!(emergency_transport_allowed(TransportKind::Mock).is_ok());
+        for kind in [TransportKind::Udp, TransportKind::Tcp] {
+            let err = emergency_transport_allowed(kind).unwrap_err();
+            assert!(
+                err.contains("refusing to place a real emergency call"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn emergency_subcommand_parses_with_urn() {
+        let args = vec![
+            "emergency".to_string(),
+            "--urn".to_string(),
+            "urn:service:sos.fire".to_string(),
+        ];
+        let raw = parse_args(&args).unwrap();
+        assert_eq!(raw.command, Some(Command::Emergency));
+        assert_eq!(raw.urn.as_deref(), Some("urn:service:sos.fire"));
+    }
 
     #[test]
     fn parses_flags_and_subcommand_in_any_order() {
@@ -1055,6 +1153,7 @@ mod tests {
             k_hex: None,
             once: true,
             verbose: false,
+            urn: ims::emergency::SOS_ROOT.to_string(),
             command: Command::Register,
         };
         run_mock(&opts, false).unwrap();
