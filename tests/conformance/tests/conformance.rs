@@ -3276,3 +3276,36 @@ fn e911_005_current_location_discovery_during_a_call() {
     assert!(text.contains("<presence"));
     assert!(!text.contains("location-info"));
 }
+
+// --- E911-006: location source boundary ---------------------------------
+
+#[test]
+fn e911_006_a_location_source_cannot_produce_an_invented_fix() {
+    use ims::emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
+    use ims::location::{FixedLocation, LocationSource};
+
+    // §5.1.6.8.3 NOTE 3: a stale or unknown fix is not available at all, so the
+    // source says None and the INVITE carries no Geolocation header.
+    let mut none = FixedLocation::unavailable();
+    assert_eq!(none.current(), None);
+
+    let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+    let request = EmergencyRequest::new(SosService::Sos, id.clone(), "192.0.2.10", 5060)
+        .with_location_source(&mut none)
+        .invite()
+        .unwrap();
+    assert_eq!(request.headers.get("geolocation"), None);
+
+    // With a fix the body carries it and the Geolocation header names it.
+    let mut fix = FixedLocation::at(Geolocation::new(48.8584, 2.2945).unwrap());
+    let request = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+        .with_location_source(&mut fix)
+        .invite()
+        .unwrap();
+    assert_eq!(
+        request.headers.get("geolocation"),
+        Some("<cid:emergency-location@192.0.2.10>")
+    );
+    let body = String::from_utf8(request.body).unwrap();
+    assert!(body.contains("<gml:pos>48.858400 2.294500</gml:pos>"));
+}

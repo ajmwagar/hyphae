@@ -139,6 +139,15 @@ pub fn location_publish(
     )
 }
 
+/// [`location_publish`], taking the fix from a [`crate::location::LocationSource`].
+pub fn location_publish_from(
+    dialog: &mut crate::Dialog,
+    entity: &str,
+    source: &mut impl crate::location::LocationSource,
+) -> sip::Request {
+    location_publish(dialog, entity, source.current())
+}
+
 /// The IANA-registered emergency services under `urn:service:sos`.
 ///
 /// Source: RFC 5031 §3.2 (the `sos.` subtree).
@@ -432,6 +441,19 @@ impl EmergencyRequest {
     /// Attach an SDP offer body produced elsewhere (e.g. `ImsProfile`).
     pub fn with_offer_sdp(mut self, sdp: impl Into<String>) -> Self {
         self.offer_sdp = Some(sdp.into());
+        self
+    }
+
+    /// Attach whatever fix the source can offer, if any.
+    ///
+    /// A source with no usable fix leaves the request without a `Geolocation`
+    /// header, which is what §5.1.6.8.3 item 9 asks for — an absent location
+    /// is a valid answer, an invented one is not.
+    pub fn with_location_source(
+        mut self,
+        source: &mut impl crate::location::LocationSource,
+    ) -> Self {
+        self.geolocation = source.current();
         self
     }
 
@@ -1270,5 +1292,57 @@ mod tests {
         assert!(body.contains("<presence"));
         assert!(!body.contains("location-info"));
         assert!(!body.contains("<gml:pos>"));
+    }
+}
+
+#[cfg(test)]
+mod location_source_tests {
+    use super::*;
+    use crate::location::FixedLocation;
+
+    #[test]
+    fn a_source_with_no_fix_leaves_the_request_without_a_geolocation_header() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let mut source = FixedLocation::unavailable();
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_location_source(&mut source)
+            .invite()
+            .unwrap();
+        assert_eq!(req.headers.get("geolocation"), None);
+        assert_eq!(req.headers.get("geolocation-routing"), None);
+    }
+
+    #[test]
+    fn a_source_with_a_fix_supplies_the_geolocation_header() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let mut source = FixedLocation::at(Geolocation::new(51.5, -0.12).unwrap());
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .with_location_source(&mut source)
+            .invite()
+            .unwrap();
+        assert_eq!(
+            req.headers.get("geolocation"),
+            Some("<cid:emergency-location@192.0.2.10>")
+        );
+        assert_eq!(req.headers.get("geolocation-routing"), Some("yes"));
+    }
+
+    #[test]
+    fn the_publish_helper_takes_the_same_source() {
+        let mut dialog = crate::Dialog::new(
+            "call-1",
+            "sip:001010000000001@ims.example",
+            "sip:psap@ims.example",
+            "b",
+            "a",
+            "sip:001010000000001@192.0.2.10:5060",
+        );
+        dialog.confirm();
+        let mut source = FixedLocation::unavailable();
+        let publish =
+            location_publish_from(&mut dialog, "sip:001010000000001@ims.example", &mut source);
+        let body = String::from_utf8(publish.body).unwrap();
+        assert!(body.contains("<presence"));
+        assert!(!body.contains("location-info"));
     }
 }
