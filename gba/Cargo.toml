@@ -1,0 +1,11 @@
+[package]
+name = "gba"
+description = "GBA bootstrapping (TS 33.220): BSF discovery names and NAF key derivation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aka.workspace = true
+carrier.workspace = true

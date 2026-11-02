@@ -149,7 +149,7 @@ fn udp_register_with_usim_derived_res() {
             impi: "001010000000001@ims.mnc001.mcc001.3gppnetwork.org",
             realm,
             res: &expected_res_for_server,
-            method: &sip::Method::Register,
+            method: "REGISTER",
             digest_uri: uri,
             nonce: got_nonce,
             nc,

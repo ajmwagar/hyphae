@@ -93,15 +93,12 @@ pub fn ck_ik_prime(ck: &Ck, ik: &Ik, network_name: &str) -> Result<([u8; 16], [u
     if name.is_empty() || name.len() > 0xffff {
         return Err(EapError::BadNetworkName(name.len()));
     }
-    let mut input = Vec::with_capacity(3 + name.len());
-    input.push(0x20);
-    input.extend_from_slice(name);
-    input.extend_from_slice(&(name.len() as u16).to_be_bytes());
-
     let mut key = [0u8; 32];
     key[..16].copy_from_slice(ck);
     key[16..].copy_from_slice(ik);
-    let out = hmac_sha256(&key, &input);
+    // TS 24.302: FC = 0x20, P0 = the access network name.
+    let out = crate::kdf::kdf(&[0x20], &[name], &key)
+        .map_err(|_| EapError::BadNetworkName(name.len()))?;
 
     let mut ck_prime = [0u8; 16];
     ck_prime.copy_from_slice(&out[..16]);

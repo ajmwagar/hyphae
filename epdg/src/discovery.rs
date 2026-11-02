@@ -23,75 +23,9 @@
 /// The DNS suffix every ePDG name ends with (TS 23.003 §19.4.2.9.2).
 pub const EPDG_SUFFIX: &str = "pub.3gppnetwork.org";
 
-/// Errors from building a discovery name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiscoveryError {
-    /// MCC must be exactly three digits.
-    BadMcc(String),
-    /// MNC must be two or three digits.
-    BadMnc(String),
-}
-
-impl core::fmt::Display for DiscoveryError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            DiscoveryError::BadMcc(v) => {
-                write!(f, "MCC must be three digits, got {v:?}")
-            }
-            DiscoveryError::BadMnc(v) => {
-                write!(f, "MNC must be two or three digits, got {v:?}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for DiscoveryError {}
-
-/// A PLMN identifier: MCC plus MNC, as carried on the SIM.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlmnId {
-    mcc: String,
-    mnc: String,
-}
-
-impl PlmnId {
-    /// Build a PLMN. `mcc` must be three digits; `mnc` two or three.
-    pub fn new(mcc: &str, mnc: &str) -> Result<Self, DiscoveryError> {
-        let mcc_digits = mcc.len() == 3 && mcc.bytes().all(|b| b.is_ascii_digit());
-        if !mcc_digits {
-            return Err(DiscoveryError::BadMcc(mcc.to_string()));
-        }
-        let mnc_digits = matches!(mnc.len(), 2 | 3) && mnc.bytes().all(|b| b.is_ascii_digit());
-        if !mnc_digits {
-            return Err(DiscoveryError::BadMnc(mnc.to_string()));
-        }
-        Ok(Self {
-            mcc: mcc.to_string(),
-            mnc: mnc.to_string(),
-        })
-    }
-
-    /// The MCC as supplied.
-    pub fn mcc(&self) -> &str {
-        &self.mcc
-    }
-
-    /// The MNC as supplied (two or three digits).
-    pub fn mnc(&self) -> &str {
-        &self.mnc
-    }
-
-    /// The MNC as it appears in DNS: always three digits, zero-padded on the
-    /// left (TS 23.003 §19.4.2.9.2).
-    pub fn mnc_dns(&self) -> String {
-        format!("{:0>3}", self.mnc)
-    }
-
-    /// `mnc<MNC>.mcc<MCC>`, the PLMN part of every ePDG name.
-    fn plmn_labels(&self) -> String {
-        format!("mnc{}.mcc{}", self.mnc_dns(), self.mcc)
-    }
-}
+/// The PLMN type and its validation error live in `carrier`, because every 3GPP
+/// discovery name is built from them, not just the ePDG ones.
+pub use carrier::{PlmnError as DiscoveryError, PlmnId};
 
 /// The Operator Identifier based ePDG FQDN (TS 23.003 §19.4.2.9.2).
 ///
