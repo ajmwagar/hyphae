@@ -194,6 +194,11 @@ impl AkaPrimePeer {
         }
     }
 
+    /// The EAP-AKA' key set, including the MSK used for IKEv2 AUTH.
+    pub fn keys(&self) -> &EapAkaPrimeKeys {
+        &self.keys
+    }
+
     fn answer_challenge(
         &mut self,
         raw: &[u8],
