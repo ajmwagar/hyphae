@@ -1,0 +1,13 @@
+[package]
+name = "epdg-lab"
+description = "UDP driver and stand-in ePDG responder for the Wi-Fi calling path"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+aka = { workspace = true }
+epdg = { workspace = true }
+transport = { workspace = true }

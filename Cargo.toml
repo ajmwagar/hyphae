@@ -14,6 +14,7 @@ members = [
     "usim",
     "cli",
     "tests/conformance",
+    "lab/epdg",
 ]
 
 [workspace.package]

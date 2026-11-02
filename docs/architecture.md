@@ -190,8 +190,13 @@ generated commands against a real kernel in two namespaces and pings across the
 tunnel, which is how two subtle requirements were found — the kernel defaults
 `auth` to a 96-bit ICV, and a policy template must repeat the state's `if_id`.
 
-Not implemented yet: driving the exchange over a socket, and the PC/SC adapter
-that would let a real USIM run this end to end.
+`lab/epdg` is the driver: `UeClient` runs the exchange over UDP holding `K`/`OPc`
+and evaluating Milenage as a USIM would, and `StandInEpdg` is an ePDG that
+shares nothing with it but the subscriber key — so a completed exchange means
+the key chain agreed, not that both sides used one fixture.
+
+Not implemented yet: the PC/SC adapter that would put a real USIM behind the
+same driver.
 
 ## 7. ARM-first targets
 

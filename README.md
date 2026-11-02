@@ -37,7 +37,7 @@ normative clause and the executable test that proves it.
 | Mobile-originated and mobile-terminated calls, CANCEL, PRACK, BYE (`INV-*`, `UAS-*`) | implemented |
 | Hold/resume, call waiting, re-INVITE/UPDATE renegotiation (`SUP-*`) | implemented |
 | Voice continuity: EPS fallback classification, media-liveness monitor (`VOICE-*`) | implemented |
-| Wi-Fi calling: EAP-AKA' keys, IKEv2 codec, EAP exchange, DH, key schedule, SK layer, IKE_SA_INIT, IKE_AUTH, child SA + configuration payload, S2b install (`EPDG-001..012`) | installed and verified against a real kernel; UDP driver and PC/SC adapter pending |
+| Wi-Fi calling: EAP-AKA' keys, IKEv2 codec, EAP exchange, DH, key schedule, SK layer, IKE_SA_INIT, IKE_AUTH, child SA + configuration payload, S2b install, UDP end-to-end (`EPDG-001..013`) | protocol complete and runs end to end over UDP; PC/SC adapter for a real SIM pending |
 | Forked INVITE, OPTIONS keepalive (`INV-004`, `KEEP-001`) | implemented |
 | SMS over IMS, both directions (`SMS-*`) | implemented |
 | Gm IPsec: authenticated ESP, SA negotiation, Linux XFRM (`SEC-002..004`) | implemented |

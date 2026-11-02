@@ -220,6 +220,13 @@ pub fn attribute(kind: u8, value: &[u8]) -> Vec<u8> {
 }
 
 /// Parse a sequence of EAP attributes, stripping padding.
+/// Split an EAP-AKA' attribute list into `(type, value)` pairs.
+///
+/// The length field of an EAP attribute counts 4-octet units (RFC 4187 §10.1),
+/// so the boundary between value and padding is not recoverable from the wire.
+/// Each returned value therefore **includes its padding**: a 16-octet `AT_RAND`
+/// comes back as 20 bytes (18 rounded up to a multiple of 4, since the 2-octet
+/// header is included). Callers that know the attribute's shape must truncate.
 pub fn parse_attributes(bytes: &[u8]) -> Result<Vec<(u8, Vec<u8>)>, EapError> {
     let mut out = Vec::new();
     let mut at = 0;

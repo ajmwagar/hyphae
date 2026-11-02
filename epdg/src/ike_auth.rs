@@ -24,9 +24,9 @@ use crate::child::{ChildError, ChildSa};
 use crate::cp::ConfigPayload;
 use crate::eap::{AkaPrimePeer, EapPacket, EAP_SUCCESS};
 use crate::ikev2::{
-    ExchangeType, Header, Id, IkeError, Notify, Payload, PayloadType, Proposal, Sa, Selector,
-    TrafficSelectors, Transform, FLAG_INITIATOR, FLAG_RESPONSE, ID_RFC822_ADDR, PROTO_ESP,
-    TRANSFORM_ENCR, TRANSFORM_INTEG,
+    ExchangeType, Header, Id, IkeError, Message, Notify, Payload, PayloadType, Proposal, Sa,
+    Selector, TrafficSelectors, Transform, FLAG_INITIATOR, FLAG_RESPONSE, ID_RFC822_ADDR,
+    PROTO_ESP, TRANSFORM_ENCR, TRANSFORM_INTEG,
 };
 use crate::keys::IkeKeys;
 use crate::sk::{Sk, SkError, BLOCK_LEN};
@@ -243,7 +243,9 @@ impl IkeAuthInitiator {
             if parsed.code == EAP_SUCCESS {
                 self.msk = Some(peer.keys().msk.to_vec());
                 self.phase = Phase::AwaitingFinalAuth;
-                // Answer with our AUTH, computed over the EAP MSK.
+                // Every request starts a new exchange, so the counter moves
+                // before the message is sealed, not after (RFC 7296 §2.2).
+                self.message_id += 1;
                 let auth = self.initiator_auth()?;
                 let sealed = self.seal(
                     vec![Payload {
@@ -253,11 +255,11 @@ impl IkeAuthInitiator {
                     }],
                     iv,
                 )?;
-                self.message_id += 1;
                 return Ok(AuthStep::Send(sealed));
             }
             // Otherwise it is an EAP request: answer it.
             let response = peer.on_request(&eap.body)?;
+            self.message_id += 1;
             let sealed = self.seal(
                 vec![Payload {
                     kind: PayloadType::Eap,
@@ -267,7 +269,6 @@ impl IkeAuthInitiator {
                 iv,
             )?;
             self.phase = Phase::AwaitingSuccess;
-            self.message_id += 1;
             return Ok(AuthStep::Send(sealed));
         }
 
@@ -295,6 +296,15 @@ impl IkeAuthInitiator {
         }
 
         Err(AuthError::Unexpected("neither EAP nor AUTH"))
+    }
+
+    /// Open an inbound message without advancing the exchange.
+    ///
+    /// A caller needs this to inspect a challenge (a USIM has to see RAND
+    /// before it can produce RES), which is why it is separate from
+    /// [`Self::on_response`].
+    pub fn peek(&self, bytes: &[u8]) -> Result<Message, AuthError> {
+        Ok(self.sk_in()?.open(bytes)?)
     }
 
     /// Whether the exchange has completed.
@@ -523,7 +533,12 @@ mod tests {
         let AuthStep::Send(response) = step else {
             panic!("expected an EAP response, got {step:?}");
         };
-        // The response is an EAP-Response/AKA'-Challenge.
+        // The response is a new request, so it carries the next message id.
+        assert_eq!(
+            Header::decode(&response).unwrap().0.message_id,
+            2,
+            "the EAP response must advance the message id"
+        );
         let opened = f.auth.sk_out().unwrap().open(&response).unwrap();
         let eap = EapPacket::parse(&opened.payloads[0].body).unwrap();
         assert_eq!(eap.code, EAP_RESPONSE);
@@ -544,6 +559,11 @@ mod tests {
         let AuthStep::Send(final_auth) = step else {
             panic!("expected AUTH, got {step:?}");
         };
+        assert_eq!(
+            Header::decode(&final_auth).unwrap().0.message_id,
+            3,
+            "AUTH is the third request"
+        );
         let opened = f.auth.sk_out().unwrap().open(&final_auth).unwrap();
         assert_eq!(opened.payloads[0].kind, PayloadType::Auth);
         let our_auth = opened.payloads[0].body.clone();
