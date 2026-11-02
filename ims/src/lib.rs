@@ -20,6 +20,7 @@ pub mod emergency;
 pub mod ims3gpp;
 pub mod keepalive;
 pub mod location;
+pub mod mwi;
 pub mod pani;
 pub mod pcscf;
 pub mod profile;
