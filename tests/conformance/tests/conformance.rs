@@ -1047,3 +1047,120 @@ fn usim_001_software_usim_returns_the_ts_35_208_vector() {
         &[0x00, 0x88, 0x00, 0x01, 0x22]
     );
 }
+
+// --- UAS-001: incoming call (INVITE / 180 / 200 / ACK / BYE) --------------
+
+#[test]
+fn uas_001_incoming_call_rings_answers_and_tears_down() {
+    use ims::{ImsProfile, IncomingCall, UasEvent, UasState};
+
+    // An INVITE from the caller with an AMR-WB offer.
+    let offer = "v=0\r\no=- 1 1 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 49170 RTP/AVP 116 117\r\na=rtpmap:116 AMR-WB/16000/1\r\na=fmtp:116 mode-set=0,1,2,3,4,5,6,7;octet-align=1\r\na=rtpmap:117 telephone-event/16000\r\na=ptime:20\r\n";
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new(
+        "Via",
+        "SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-uas-1;rport",
+    ));
+    headers.push(sip::Header::new(
+        "From",
+        "<sip:001010000000002@ims.example>;tag=caller-tag",
+    ));
+    headers.push(sip::Header::new("To", "<sip:001010000000001@ims.example>"));
+    headers.push(sip::Header::new("Call-ID", "uas-call-1"));
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    headers.push(sip::Header::new("Supported", "100rel"));
+    headers.push(sip::Header::new("Content-Type", "application/sdp"));
+    let invite = sip::Request {
+        method: sip::Method::Invite,
+        uri: "sip:001010000000001@ims.example".into(),
+        headers,
+        body: offer.as_bytes().to_vec(),
+    };
+
+    let mut call = IncomingCall::from_invite(&invite, ImsProfile::lab_default()).unwrap();
+    assert_eq!(call.state(), UasState::Offered);
+
+    // 180 Ringing is a reliable provisional: Require: 100rel + RSeq, and the
+    // To header carries our local tag (RFC 3262 §3, RFC 3261 §12.1.1).
+    let ringing = call.ringing();
+    assert_eq!(ringing.status, 180);
+    assert_eq!(ringing.headers.get("require"), Some("100rel"));
+    assert!(ringing.headers.get("rseq").is_some());
+    assert!(ringing.headers.get("to").unwrap().contains("tag="));
+    assert_eq!(ringing.headers.get("call-id"), Some("uas-call-1"));
+
+    // 200 OK carries the SDP answer and a Contact for the dialog.
+    let ok = call.accept().unwrap();
+    assert_eq!(ok.status, 200);
+    assert_eq!(ok.headers.get("content-type"), Some("application/sdp"));
+    assert!(ok.headers.get("contact").is_some());
+    let answer = String::from_utf8(ok.body.clone()).unwrap();
+    assert!(answer.contains("m=audio"));
+    assert!(answer.contains("AMR-WB"));
+    assert_eq!(call.state(), UasState::Accepted);
+
+    // ACK confirms the dialog; BYE tears it down.
+    let ack = sip::Request {
+        method: sip::Method::Ack,
+        uri: invite.uri.clone(),
+        headers: {
+            let mut h = sip::Headers::new();
+            h.push(sip::Header::new("CSeq", "1 ACK"));
+            h
+        },
+        body: Vec::new(),
+    };
+    assert_eq!(call.on_request(&ack).unwrap(), UasEvent::Established);
+    assert_eq!(call.state(), UasState::Confirmed);
+
+    let bye = sip::Request {
+        method: sip::Method::Bye,
+        uri: invite.uri.clone(),
+        headers: {
+            let mut h = sip::Headers::new();
+            h.push(sip::Header::new("CSeq", "2 BYE"));
+            h
+        },
+        body: Vec::new(),
+    };
+    assert_eq!(call.on_request(&bye).unwrap(), UasEvent::Terminated);
+    assert_eq!(call.state(), UasState::Terminated);
+}
+
+#[test]
+fn uas_001_cancel_answers_200_and_487() {
+    use ims::{ImsProfile, IncomingCall, UasEvent};
+
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("From", "<sip:a@example>;tag=t1"));
+    headers.push(sip::Header::new("To", "<sip:b@example>"));
+    headers.push(sip::Header::new("Call-ID", "cancel-call"));
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    let invite = sip::Request {
+        method: sip::Method::Invite,
+        uri: "sip:b@example".into(),
+        headers,
+        body: Vec::new(),
+    };
+    let mut call = IncomingCall::from_invite(&invite, ImsProfile::lab_default()).unwrap();
+    let _ = call.ringing();
+
+    // RFC 3261 §9.2: CANCEL is answered 200, and the INVITE gets 487.
+    let cancel = sip::Request {
+        method: sip::Method::Cancel,
+        uri: invite.uri.clone(),
+        headers: {
+            let mut h = sip::Headers::new();
+            h.push(sip::Header::new("CSeq", "1 CANCEL"));
+            h
+        },
+        body: Vec::new(),
+    };
+    match call.on_request(&cancel).unwrap() {
+        UasEvent::Cancelled { responses } => {
+            assert_eq!(responses[0].status, 200);
+            assert_eq!(responses[1].status, 487);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
