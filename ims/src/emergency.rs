@@ -284,6 +284,9 @@ pub struct EmergencyRequest {
     /// Whether to ask for current-location discovery during the call
     /// (TS 24.229 §5.1.6.8.3 item 10, §5.1.6.12).
     current_location_discovery: bool,
+    /// `Some(instance)` when this is an unregistered emergency call
+    /// (TS 24.229 §5.1.6.8.2), where `instance` is the RFC 5626 instance ID.
+    anonymous_instance: Option<String>,
     service_route: Vec<String>,
     offer_sdp: Option<String>,
 }
@@ -310,6 +313,7 @@ impl EmergencyRequest {
             geolocation: None,
             pani: None,
             current_location_discovery: false,
+            anonymous_instance: None,
             service_route: Vec::new(),
             offer_sdp: None,
         }
@@ -354,6 +358,29 @@ impl EmergencyRequest {
         self
     }
 
+    /// Build the *unregistered* emergency call of TS 24.229 §5.1.6.8.2.
+    ///
+    /// Use this when the network answered the emergency registration with a
+    /// 403/420 and an `<action>anonymous-emergencycall</action>` — see
+    /// [`EmergencyFallback`]. It changes three things:
+    ///
+    /// * `From` becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`, the
+    ///   form TS 24.229 itself uses for an anonymous identity;
+    /// * `P-Preferred-Identity` is dropped, because there is no registered
+    ///   identity to prefer;
+    /// * the `Contact` gains the RFC 5626 `+sip.instance` media feature tag and
+    ///   the `Via` gains `rport`/`keep`, because the dialog lives on an
+    ///   unprotected port that has to stay reachable for the PSAP to call back.
+    pub fn anonymous(mut self, instance_id: impl Into<String>) -> Self {
+        self.anonymous_instance = Some(instance_id.into());
+        self
+    }
+
+    /// Whether this request is the unregistered form.
+    pub fn is_anonymous(&self) -> bool {
+        self.anonymous_instance.is_some()
+    }
+
     /// The service URN this request targets.
     pub fn urn(&self) -> SosService {
         self.urn
@@ -395,24 +422,53 @@ impl EmergencyRequest {
         let cid_host = host.split(':').next().unwrap_or(&host).to_string();
         headers.push(Header::new(
             "Via",
-            format!("SIP/2.0/UDP {host};branch=z9hG4bK-fungos-emerg-1;rport"),
+            if self.is_anonymous() {
+                // §5.1.6.8.2 item 7: `rport` and `keep` on an unprotected port,
+                // so the dialog survives and stays reachable.
+                format!("SIP/2.0/UDP {host};branch=z9hG4bK-fungos-emerg-1;rport;keep")
+            } else {
+                format!("SIP/2.0/UDP {host};branch=z9hG4bK-fungos-emerg-1;rport")
+            },
         ));
         headers.push(Header::new("Max-Forwards", "70"));
-        headers.push(Header::new(
-            "From",
-            format!("<{}>;tag={}", self.identity.uri(), self.local_tag),
-        ));
+        // §5.1.6.8.2 item 1: an unregistered emergency call is sent as
+        // "Anonymous"; §5.1.6.8.3 item 1: otherwise the registered identity.
+        let from_uri = if self.is_anonymous() {
+            "sip:anonymous@anonymous.invalid".to_string()
+        } else {
+            self.identity.uri().to_string()
+        };
+        let from = if self.is_anonymous() {
+            format!("\"Anonymous\" <{from_uri}>;tag={}", self.local_tag)
+        } else {
+            format!("<{from_uri}>;tag={}", self.local_tag)
+        };
+        headers.push(Header::new("From", from));
         headers.push(Header::new("To", format!("<{}>", self.urn.as_str())));
         headers.push(Header::new("Call-ID", self.call_id.clone()));
         headers.push(Header::new("CSeq", format!("{} INVITE", self.cseq)));
         for route in &self.service_route {
             headers.push(Header::new("Route", format!("<{route}>")));
         }
-        headers.push(Header::new("Contact", format!("<{}>", self.local_contact)));
-        headers.push(Header::new(
-            "P-Preferred-Identity",
-            format!("<{}>", self.identity.uri()),
-        ));
+        // §5.1.6.8.2 item 6: the Contact carries a `sip.instance` media feature
+        // tag on an unprotected port, and no GRUU.
+        let contact = match &self.anonymous_instance {
+            Some(instance) => format!(
+                "<{};+sip.instance=\"<urn:uuid:{instance}>\">",
+                self.local_contact
+            ),
+            None => format!("<{}>", self.local_contact),
+        };
+        headers.push(Header::new("Contact", contact));
+        // §5.1.6.8.2 item 5 only defines an equipment identifier for access
+        // technologies that specify one; with no registered identity there is
+        // nothing to prefer, so the header is omitted.
+        if !self.is_anonymous() {
+            headers.push(Header::new(
+                "P-Preferred-Identity",
+                format!("<{}>", self.identity.uri()),
+            ));
+        }
         if let Some(pani) = &self.pani {
             headers.push(Header::new("P-Access-Network-Info", pani.clone()));
         }
@@ -595,6 +651,53 @@ impl EmergencyRegistration {
             headers,
             body: Vec::new(),
         }
+    }
+}
+
+/// What to do after the network refuses a step of the emergency procedure.
+///
+/// The network answers with an `application/3gpp-ims+xml` body carrying an
+/// `<alternative-service>` ([`crate::ims3gpp`]) that says what to try instead.
+/// This type is the decision, not the action: it never sends anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmergencyFallback {
+    /// TS 24.229 §5.1.6.2: the emergency registration was refused with 403 or
+    /// 420 and an `anonymous-emergencycall` action. Place the call without
+    /// registration, per §5.1.6.8.2 — see [`EmergencyRequest::anonymous`].
+    AnonymousEmergencyCall,
+    /// TS 24.229 §5.1.6.8.3: a 380 (Alternative Service) suggests a new initial
+    /// emergency registration, possibly in another VPLMN.
+    EmergencyRegistration,
+}
+
+/// Decide what an emergency response asks the UE to do (TS 24.229 §5.1.6.2,
+/// §5.1.6.8.3).
+///
+/// Returns `None` for every other response, including a well-formed XML body
+/// whose action does not apply to this situation. `None` means "nothing to
+/// fall back to", never "retry anyway".
+///
+/// The caller must have established that the request really was the emergency
+/// one: §5.1.6.2 frames these responses as coming back to a REGISTER whose
+/// `Contact` carries the `sos` URI parameter. That check needs the request, so
+/// it is not repeated here.
+pub fn emergency_fallback(response: &sip::Response) -> Option<EmergencyFallback> {
+    let content_type = response.headers.get("content-type")?;
+    if !content_type.contains(crate::ims3gpp::IMS3GPP_MIME) {
+        return None;
+    }
+    let service = crate::ims3gpp::parse_alternative_service(&response.body)?;
+    if service.kind != crate::ims3gpp::AlternativeType::Emergency {
+        return None;
+    }
+    match (response.status, service.action) {
+        (403 | 420, Some(crate::ims3gpp::AlternativeAction::AnonymousEmergencyCall)) => {
+            Some(EmergencyFallback::AnonymousEmergencyCall)
+        }
+        (380, Some(crate::ims3gpp::AlternativeAction::EmergencyRegistration)) => {
+            Some(EmergencyFallback::EmergencyRegistration)
+        }
+        _ => None,
     }
 }
 fn identity_user(identity: &EmergencyIdentity) -> &str {
@@ -858,5 +961,103 @@ mod tests {
         assert_eq!(req.headers.get("proxy-authorization"), None);
         // And it is not a "Service: sos" registration: that header is not used.
         assert_eq!(req.headers.get("service"), None);
+    }
+    fn xml_response(status: u16, body: &str) -> sip::Response {
+        let mut headers = Headers::new();
+        headers.push(Header::new("Content-Type", crate::ims3gpp::IMS3GPP_MIME));
+        sip::Response {
+            status,
+            reason: String::new(),
+            headers,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    const ANON_XML: &str = r#"<ims-3gpp version="1"><alternative-service>
+        <type>emergency</type><reason>no emergency registration here</reason>
+        <action>anonymous-emergencycall</action></alternative-service></ims-3gpp>"#;
+
+    const REREG_XML: &str = r#"<ims-3gpp version="1"><alternative-service>
+        <type>emergency</type><reason>try another network</reason>
+        <action>emergency-registration</action></alternative-service></ims-3gpp>"#;
+
+    #[test]
+    fn forbidden_or_bad_extension_with_anonymous_action_falls_back() {
+        assert_eq!(
+            emergency_fallback(&xml_response(403, ANON_XML)),
+            Some(EmergencyFallback::AnonymousEmergencyCall)
+        );
+        assert_eq!(
+            emergency_fallback(&xml_response(420, ANON_XML)),
+            Some(EmergencyFallback::AnonymousEmergencyCall)
+        );
+    }
+
+    #[test]
+    fn a_380_suggesting_re_registration_is_a_different_fallback() {
+        assert_eq!(
+            emergency_fallback(&xml_response(380, REREG_XML)),
+            Some(EmergencyFallback::EmergencyRegistration)
+        );
+        // The mapping is by status as well as action.
+        assert_eq!(emergency_fallback(&xml_response(403, REREG_XML)), None);
+        assert_eq!(emergency_fallback(&xml_response(380, ANON_XML)), None);
+    }
+
+    #[test]
+    fn a_response_without_the_xml_body_falls_back_to_nothing() {
+        let mut headers = Headers::new();
+        headers.push(Header::new("Content-Type", "text/plain"));
+        let plain = sip::Response {
+            status: 403,
+            reason: String::new(),
+            headers,
+            body: ANON_XML.as_bytes().to_vec(),
+        };
+        assert_eq!(emergency_fallback(&plain), None);
+    }
+
+    #[test]
+    fn the_unregistered_call_is_anonymous_with_an_instance_id() {
+        let id = EmergencyIdentity::temporary_from_imsi(
+            "001010000000001",
+            "ims.mnc001.mcc001.3gppnetwork.org",
+        );
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .anonymous("6f9c2b1e-0000-4000-8000-000000000001")
+            .invite()
+            .unwrap();
+        assert!(req
+            .headers
+            .get("from")
+            .unwrap()
+            .starts_with("\"Anonymous\" <sip:anonymous@anonymous.invalid>;tag="));
+        // §5.1.6.8.2 item 1 and, by consequence, no preferred identity.
+        assert_eq!(req.headers.get("p-preferred-identity"), None);
+        // Item 6: `+sip.instance` on the Contact, and no GRUU.
+        assert!(req
+            .headers
+            .get("contact")
+            .unwrap()
+            .contains("+sip.instance=\"<urn:uuid:6f9c2b1e-0000-4000-8000-000000000001>\""));
+        // Item 7: an unprotected port that stays reachable.
+        assert!(req.headers.get("via").unwrap().ends_with(";rport;keep"));
+        // The URN is unchanged.
+        assert_eq!(req.uri, "urn:service:sos");
+    }
+
+    #[test]
+    fn the_registered_call_keeps_its_identity_and_preferred_identity() {
+        let id = EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap();
+        let req = EmergencyRequest::new(SosService::Sos, id, "192.0.2.10", 5060)
+            .invite()
+            .unwrap();
+        assert!(!req
+            .headers
+            .get("from")
+            .unwrap()
+            .starts_with("\"Anonymous\""));
+        assert!(req.headers.get("p-preferred-identity").is_some());
+        assert!(!req.headers.get("via").unwrap().contains(";keep"));
     }
 }

@@ -3084,3 +3084,106 @@ fn epdg_021_emergency_discovery_fqdns_match_the_specification_examples() {
         "sos.en.epc.mcc345.visited-country.pub.3gppnetwork.org"
     );
 }
+
+// --- E911-004: unauthenticated emergency fallback -----------------------
+
+#[test]
+fn e911_004_unauthenticated_emergency_fallback() {
+    use ims::emergency::{
+        emergency_fallback, EmergencyFallback, EmergencyIdentity, EmergencyRegistration,
+        EmergencyRequest, SosService,
+    };
+    use ims::ims3gpp::{
+        parse_alternative_service, AlternativeAction, AlternativeType, IMS3GPP_MIME,
+    };
+
+    // A network that will not do emergency registration answers 403/420 with an
+    // IM CN subsystem XML body (TS 24.229 §5.1.6.2).
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ims-3gpp version="1"><alternative-service>
+  <type>emergency</type>
+  <reason>emergency registration not supported</reason>
+  <action>anonymous-emergencycall</action>
+</alternative-service></ims-3gpp>"#;
+
+    let service = parse_alternative_service(xml.as_bytes()).unwrap();
+    assert_eq!(service.kind, AlternativeType::Emergency);
+    assert_eq!(
+        service.action,
+        Some(AlternativeAction::AnonymousEmergencyCall)
+    );
+
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("Content-Type", IMS3GPP_MIME));
+    let response = sip::Response {
+        status: 403,
+        reason: "Forbidden".into(),
+        headers,
+        body: xml.as_bytes().to_vec(),
+    };
+    assert_eq!(
+        emergency_fallback(&response),
+        Some(EmergencyFallback::AnonymousEmergencyCall)
+    );
+
+    // §5.1.6.8.2: the call is then placed without registration — From
+    // "Anonymous", no preferred identity, a sip.instance Contact on an
+    // unprotected port that stays reachable.
+    let identity = EmergencyIdentity::temporary_from_imsi(
+        "001010000000001",
+        "ims.mnc001.mcc001.3gppnetwork.org",
+    );
+    let request = EmergencyRequest::new(SosService::Sos, identity, "192.0.2.10", 5060)
+        .anonymous("6f9c2b1e-0000-4000-8000-000000000001")
+        .invite()
+        .unwrap();
+    assert_eq!(request.uri, "urn:service:sos");
+    assert!(request
+        .headers
+        .get("from")
+        .unwrap()
+        .starts_with("\"Anonymous\" <sip:anonymous@anonymous.invalid>"));
+    assert_eq!(request.headers.get("p-preferred-identity"), None);
+    assert!(request
+        .headers
+        .get("contact")
+        .unwrap()
+        .contains("+sip.instance="));
+    assert!(request.headers.get("via").unwrap().ends_with(";rport;keep"));
+
+    // The other named action leads somewhere else: a new emergency
+    // registration, signalled by a 380 (Alternative Service).
+    let rerereg = r#"<ims-3gpp version="1"><alternative-service>
+      <type>emergency</type><reason>roam</reason>
+      <action>emergency-registration</action>
+    </alternative-service></ims-3gpp>"#;
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("Content-Type", IMS3GPP_MIME));
+    let response = sip::Response {
+        status: 380,
+        reason: "Alternative Service".into(),
+        headers,
+        body: rerereg.as_bytes().to_vec(),
+    };
+    assert_eq!(
+        emergency_fallback(&response),
+        Some(EmergencyFallback::EmergencyRegistration)
+    );
+
+    // An unknown action is not a licence to retry: the body fails to parse and
+    // nothing is suggested.
+    let bogus = r#"<ims-3gpp version="1"><alternative-service>
+      <type>emergency</type><action>try-again</action>
+    </alternative-service></ims-3gpp>"#;
+    assert!(parse_alternative_service(bogus.as_bytes()).is_none());
+
+    // And the registration it would have replaced is the `sos` Contact form.
+    let reg = EmergencyRegistration::new(
+        EmergencyIdentity::registered("sip:001010000000001@ims.example").unwrap(),
+        "192.0.2.10",
+        5060,
+        600,
+    )
+    .register("sip:ims.example", "192.0.2.10", 5060);
+    assert!(reg.headers.get("contact").unwrap().contains(";sos>"));
+}
