@@ -171,10 +171,8 @@ impl<C: VendorChannel> CcciTransport<C> {
         let buf: Vec<u8> = self.pending.iter().copied().collect();
         match parse_frame(&buf) {
             Ok((payload, consumed)) => {
-                let text = String::from_utf8(payload.to_vec())
+                let message = Message::parse_bytes(payload)
                     .map_err(|e| TransportError::Codec(e.to_string()))?;
-                let message =
-                    Message::parse(&text).map_err(|e| TransportError::Codec(e.to_string()))?;
                 self.pending.drain(..consumed + CHANNEL_LEN_PREFIX);
                 Ok(Some(message))
             }

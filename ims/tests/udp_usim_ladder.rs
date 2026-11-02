@@ -98,7 +98,7 @@ fn udp_register_with_usim_derived_res() {
 
         // 1. Initial REGISTER (no Authorization) -> 401 with the AKA nonce.
         let (n, peer) = server.recv_from(&mut buf).unwrap();
-        let first = sip::Message::parse(&String::from_utf8_lossy(&buf[..n])).unwrap();
+        let first = sip::Message::parse_bytes(&buf[..n]).unwrap();
         let sip::Message::Request(req) = first else {
             panic!("expected a request");
         };
@@ -129,7 +129,7 @@ fn udp_register_with_usim_derived_res() {
 
         // 2. Challenged REGISTER -> verify the digest, then 200 OK.
         let (n, peer) = server.recv_from(&mut buf).unwrap();
-        let second = sip::Message::parse(&String::from_utf8_lossy(&buf[..n])).unwrap();
+        let second = sip::Message::parse_bytes(&buf[..n]).unwrap();
         let sip::Message::Request(req) = second else {
             panic!("expected a request");
         };

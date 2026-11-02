@@ -75,13 +75,9 @@ impl Transport for ModemTransport {
         let deadline = std::time::Instant::now() + timeout;
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match self.rx.recv_timeout(remaining) {
-            Ok(bytes) => {
-                let text =
-                    String::from_utf8(bytes).map_err(|e| TransportError::Codec(e.to_string()))?;
-                Message::parse(&text)
-                    .map(Some)
-                    .map_err(|e| TransportError::Codec(e.to_string()))
-            }
+            Ok(bytes) => Message::parse_bytes(&bytes)
+                .map(Some)
+                .map_err(|e| TransportError::Codec(e.to_string())),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::Closed),
         }

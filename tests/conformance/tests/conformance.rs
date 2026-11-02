@@ -1164,3 +1164,110 @@ fn uas_001_cancel_answers_200_and_487() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+// --- INV-003: outgoing CANCEL ---------------------------------------------
+
+#[test]
+fn inv_003_cancel_reuses_the_invite_transaction() {
+    use ims::{Call, CallEvent, CallState, ImsProfile};
+
+    let mut call = Call::new(ImsProfile::lab_default(), "sip:b@ims.example");
+    let CallEvent::Send(invite) = call.invite() else {
+        panic!("invite expected")
+    };
+    let invite_branch = invite.headers.via().unwrap().branch().unwrap().to_string();
+
+    // RFC 3261 §9.1: the CANCEL matches the INVITE's branch and CSeq number;
+    // only the method differs, and it carries no body or Contact.
+    let cancel = call.cancel().expect("CANCEL before a final response");
+    assert_eq!(cancel.method, sip::Method::Cancel);
+    assert_eq!(
+        cancel.headers.via().unwrap().branch().unwrap(),
+        invite_branch
+    );
+    assert_eq!(cancel.headers.get("cseq"), Some("1 CANCEL"));
+    assert_eq!(cancel.headers.get("call-id"), invite.headers.get("call-id"));
+    assert!(cancel.body.is_empty());
+    assert_eq!(call.state(), CallState::Cancelling);
+
+    // 200 to CANCEL is a no-op; 487 to INVITE ends the attempt.
+    let mut ok_headers = sip::Headers::new();
+    ok_headers.push(sip::Header::new("CSeq", "1 CANCEL"));
+    let cancel_ok = sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers: ok_headers,
+        body: Vec::new(),
+    };
+    assert_eq!(call.on_response(&cancel_ok), CallEvent::Provisional);
+
+    let mut terminated_headers = sip::Headers::new();
+    terminated_headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    let terminated = sip::Response {
+        status: 487,
+        reason: "Request Terminated".into(),
+        headers: terminated_headers,
+        body: Vec::new(),
+    };
+    assert_eq!(call.on_response(&terminated), CallEvent::Failed(487));
+    assert_eq!(call.state(), CallState::Terminated);
+}
+
+// --- SMS-002: mobile-terminated SMS ---------------------------------------
+
+#[test]
+fn sms_002_mt_deliver_is_decoded_and_acknowledged() {
+    use ims::sms::{delivery_response, receive_message, rp_ack, RpData, SmsDeliver};
+    use ims::ImsProfile;
+
+    // Network -> MS: RP-DATA wrapping an SMS-DELIVER TPDU (TS 24.011, GSM 03.40).
+    let tpdu = SmsDeliver {
+        originator: "15551234567".into(),
+        pid: 0,
+        dcs: 0,
+        scts: [0x42, 0x10, 0x51, 0x32, 0x41, 0x00, 0x00],
+        text: "meet me at 9".into(),
+    }
+    .encode();
+    assert_eq!(tpdu[0] & 0x03, 0x00, "TP-MTI must be SMS-DELIVER");
+
+    let rp = RpData {
+        message_reference: 42,
+        originator: "15551234567".into(),
+        destination: "001010000000001".into(),
+        tpdu,
+    };
+    let body = rp.encode();
+    assert_eq!(body[0], 0x01, "RP-MTI network->MS must be 0x01");
+
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new(
+        "Via",
+        "SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-mt-1;rport",
+    ));
+    headers.push(sip::Header::new("From", "<sip:ip-sm-gw@ims>;tag=gw-1"));
+    headers.push(sip::Header::new("To", "<sip:001010000000001@ims>"));
+    headers.push(sip::Header::new("Call-ID", "mt-sms-1"));
+    headers.push(sip::Header::new("CSeq", "1 MESSAGE"));
+    let message = sip::Request {
+        method: sip::Method::Message,
+        uri: "sip:001010000000001@ims".into(),
+        headers,
+        body,
+    };
+
+    // The UE decodes originator + text and ACKs with RP-ACK in the 200 OK.
+    let incoming = receive_message(&message).expect("MT SMS should decode");
+    assert_eq!(incoming.originator, "15551234567");
+    assert_eq!(incoming.text, "meet me at 9");
+    assert_eq!(incoming.message_reference, 42);
+
+    let response = delivery_response(&message, &ImsProfile::lab_default()).expect("200 OK");
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers.get("content-type"),
+        Some("application/vnd.3gpp.sms")
+    );
+    assert_eq!(response.body, rp_ack(42));
+    assert_eq!(response.body, vec![0x02, 42, 0x00]);
+}

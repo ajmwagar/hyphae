@@ -48,7 +48,7 @@ rows (see [`docs/specs.md`](docs/specs.md)).
 sip/        RFC 3261 messages, headers, transactions; no I/O
 aka/        Milenage f1–f5, AUTN verification, RFC 3310 RES; pure functions
 ims/        profile, REGISTER/401/407, SDP offer/answer, PRACK/UPDATE/BYE,
-            caller + callee (UAS) call paths, emergency (E911) construction
+            caller + callee (UAS) call paths, CANCEL, MO/MT SMS, emergency (E911)
 carrier/    TOML profiles keyed by MCC/MNC + lab profile 00101
 codec/      Codec trait + optional Opus (feature `opus`); PCM only
 codec-amr/  RFC 4867 payload format + optional AMR-WB FFI (separate package)

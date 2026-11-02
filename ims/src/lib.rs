@@ -28,5 +28,5 @@ pub use emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService
 pub use profile::{ImsProfile, SecurityClient};
 pub use register::{Challenge, Registration, RegistrationEvent, RegistrationState};
 pub use sdp::{Connection, Media, Origin, PrecondDir, Precondition, Sdp};
-pub use sms::{SmsSender, SmsSubmit};
+pub use sms::{IncomingSms, RpData, SmsDeliver, SmsSender, SmsSubmit};
 pub use uas::{IncomingCall, UasError, UasEvent, UasState};
