@@ -1920,3 +1920,166 @@ fn epdg_001_eap_aka_prime_derives_the_full_key_set() {
     assert_eq!(mac, at_mac(&keys.k_aut, &zeroed, 2).unwrap());
     assert_eq!(mac.len(), 16);
 }
+
+// --- EPDG-002: IKEv2 message and payload codec ----------------------------
+
+#[test]
+fn epdg_002_ikev2_message_round_trips_the_wire() {
+    use epdg::ikev2::{
+        encode_payloads, ExchangeType, Header, Ke, Message, Payload, PayloadType, Proposal, Sa,
+        Transform, FLAG_INITIATOR, HEADER_LEN, PROTO_ESP, TRANSFORM_DH, TRANSFORM_ENCR,
+    };
+
+    let header = Header {
+        initiator_spi: [0x11; 8],
+        responder_spi: [0; 8],
+        next_payload: PayloadType::Sa,
+        exchange: ExchangeType::IkeSaInit,
+        flags: FLAG_INITIATOR,
+        message_id: 0,
+    };
+
+    // A realistic IKE_SA_INIT: SA + KE + Nonce.
+    let message = Message {
+        header,
+        payloads: vec![
+            Payload {
+                kind: PayloadType::Sa,
+                critical: false,
+                body: Sa {
+                    proposals: vec![Proposal {
+                        number: 1,
+                        protocol_id: PROTO_ESP,
+                        spi: vec![],
+                        transforms: vec![
+                            Transform {
+                                transform_type: TRANSFORM_ENCR,
+                                id: 12, // AES-CBC
+                                attributes: vec![],
+                            },
+                            Transform {
+                                transform_type: TRANSFORM_DH,
+                                id: 14, // MODP 2048
+                                attributes: vec![],
+                            },
+                        ],
+                    }],
+                }
+                .encode(),
+            },
+            Payload {
+                kind: PayloadType::Ke,
+                critical: false,
+                body: Ke {
+                    dh_group: 14,
+                    key_data: vec![0x42; 256],
+                }
+                .encode(),
+            },
+            Payload {
+                kind: PayloadType::Nonce,
+                critical: false,
+                body: vec![0xAB; 32],
+            },
+        ],
+    };
+
+    let bytes = message.encode();
+    // 28-octet header, version 2.0, exchange IKE_SA_INIT.
+    assert_eq!(bytes[17], 0x20);
+    assert_eq!(bytes[18], 34);
+    assert_eq!(bytes[19], FLAG_INITIATOR);
+    assert_eq!(
+        u32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]) as usize,
+        bytes.len()
+    );
+    assert_eq!(bytes[16], PayloadType::Sa as u8);
+    assert_eq!(&bytes[..8], &[0x11; 8]);
+
+    let decoded = Message::decode(&bytes).unwrap();
+    assert_eq!(decoded.header, header);
+    assert_eq!(decoded.payloads, message.payloads);
+    assert_eq!(
+        HEADER_LEN + encode_payloads(&message.payloads).len(),
+        bytes.len()
+    );
+
+    // The payload chain links SA -> KE -> NONCE.
+    let ke = decoded.find(PayloadType::Ke).unwrap();
+    assert_eq!(Ke::decode(&ke.body).unwrap().dh_group, 14);
+}
+
+// --- EPDG-003: EAP-AKA' challenge / response ------------------------------
+
+#[test]
+fn epdg_003_eap_aka_prime_peer_answers_the_challenge() {
+    use aka::eap_aka_prime::{
+        at_mac, attribute, ck_ik_prime, derive_keys, kdf_input_attribute, AT_MAC_LEN,
+    };
+    use epdg::eap::{
+        attribute_value_offset, AkaPrimePeer, EapPacket, AT_MAC, AT_RES, EAP_REQUEST, EAP_RESPONSE,
+        EAP_TYPE_AKA_PRIME, SUBTYPE_CHALLENGE,
+    };
+
+    let network = "WLAN";
+    let identity = "user@example";
+    let res = [0xA5u8; 8];
+
+    // The USIM produced CK/IK; EAP-AKA' re-derives them for this access network.
+    let (ck, ik) = ck_ik_prime(&[0x11; 16], &[0x22; 16], network).unwrap();
+    let keys = derive_keys(&ck, &ik, network, identity, &[0x80, 0x00]).unwrap();
+
+    // Server: EAP-Request/AKA'-Challenge with AT_KDF_INPUT and a valid AT_MAC.
+    let mut attributes = kdf_input_attribute(network).unwrap();
+    attributes.extend_from_slice(&attribute(0x80 | AT_MAC, &[0u8; AT_MAC_LEN]));
+    let mut challenge =
+        EapPacket::response(7, EAP_TYPE_AKA_PRIME, Some(SUBTYPE_CHALLENGE), &attributes);
+    challenge[0] = EAP_REQUEST;
+    let mac_at = 4 + 2 + attribute_value_offset(&attributes, AT_MAC).unwrap();
+    let server_mac = at_mac(&keys.k_aut, &challenge, mac_at).unwrap();
+    challenge[mac_at..mac_at + AT_MAC_LEN].copy_from_slice(&server_mac);
+
+    // Peer: verify, then answer with AT_RES and its own AT_MAC.
+    let mut peer = AkaPrimePeer::new(network, keys.clone(), res.to_vec());
+    let response = peer.on_request(&challenge).unwrap();
+    let parsed = EapPacket::parse(&response).unwrap();
+    assert_eq!(parsed.code, EAP_RESPONSE);
+    assert_eq!(parsed.identifier, 7);
+
+    let res_at = attribute_value_offset(&parsed.attributes, AT_RES).unwrap();
+    assert_eq!(
+        u16::from_be_bytes([parsed.attributes[res_at], parsed.attributes[res_at + 1]]),
+        64
+    );
+    assert_eq!(&parsed.attributes[res_at + 2..res_at + 10], &res[..]);
+
+    // The peer's AT_MAC verifies with K_aut.
+    let our_mac_at = attribute_value_offset(&parsed.attributes, AT_MAC).unwrap();
+    let packet_mac = 4 + 2 + our_mac_at;
+    let mut zeroed = response.clone();
+    zeroed[packet_mac..packet_mac + AT_MAC_LEN].fill(0);
+    assert_eq!(
+        &response[packet_mac..packet_mac + AT_MAC_LEN],
+        &at_mac(&keys.k_aut, &zeroed, packet_mac).unwrap()[..]
+    );
+
+    // A challenge for a different access network is refused.
+    let other_keys = derive_keys(
+        &ck_ik_prime(&[0x11; 16], &[0x22; 16], "OTHER").unwrap().0,
+        &ck_ik_prime(&[0x11; 16], &[0x22; 16], "OTHER").unwrap().1,
+        "OTHER",
+        identity,
+        &[0x80, 0x00],
+    )
+    .unwrap();
+    let mut wrong_attrs = kdf_input_attribute("OTHER").unwrap();
+    wrong_attrs.extend_from_slice(&attribute(0x80 | AT_MAC, &[0u8; AT_MAC_LEN]));
+    let mut wrong =
+        EapPacket::response(8, EAP_TYPE_AKA_PRIME, Some(SUBTYPE_CHALLENGE), &wrong_attrs);
+    wrong[0] = EAP_REQUEST;
+    let wrong_mac_at = 4 + 2 + attribute_value_offset(&wrong_attrs, AT_MAC).unwrap();
+    let m = at_mac(&other_keys.k_aut, &wrong, wrong_mac_at).unwrap();
+    wrong[wrong_mac_at..wrong_mac_at + AT_MAC_LEN].copy_from_slice(&m);
+    let mut peer = AkaPrimePeer::new(network, keys, res.to_vec());
+    assert!(peer.on_request(&wrong).is_err());
+}
