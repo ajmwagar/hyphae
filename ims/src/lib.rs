@@ -19,6 +19,7 @@ pub mod dialog;
 pub mod emergency;
 pub mod keepalive;
 pub mod pani;
+pub mod pcscf;
 pub mod profile;
 pub mod register;
 pub mod sdp;
