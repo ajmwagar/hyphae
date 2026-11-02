@@ -19,6 +19,7 @@ pub mod dialog;
 pub mod emergency;
 pub mod ims3gpp;
 pub mod keepalive;
+pub mod location;
 pub mod pani;
 pub mod pcscf;
 pub mod profile;
@@ -33,6 +34,7 @@ pub use continuity::{classify_invite_failure, ContinuityEvent, ContinuityMonitor
 pub use dialog::{Dialog, DialogState};
 pub use emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
 pub use keepalive::{Keepalive, KeepaliveStatus};
+pub use location::{FixedLocation, LocationSource};
 pub use profile::{ImsProfile, SecurityClient};
 pub use register::{Challenge, Registration, RegistrationEvent, RegistrationState};
 pub use sdp::Direction;
