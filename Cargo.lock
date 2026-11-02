@@ -155,6 +155,7 @@ version = "0.1.0"
 dependencies = [
  "aka",
  "num-bigint",
+ "sha1",
  "subtle",
 ]
 

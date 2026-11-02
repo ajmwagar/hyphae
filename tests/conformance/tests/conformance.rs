@@ -2821,3 +2821,62 @@ fn sip_006_pcscf_discovery_follows_rfc3263() {
     );
     assert_eq!(Transport::Tls.default_port(), 5061);
 }
+
+// --- EPDG-020: NAT traversal -------------------------------------------
+
+#[test]
+fn epdg_020_nat_traversal_detects_and_encapsulates() {
+    use epdg::natt::{
+        decapsulate, encapsulate, is_nat_keepalive, nat_detection_hash, nat_detection_notifies,
+        NatDetector, NAT_DETECTION_DESTINATION_IP, NAT_DETECTION_SOURCE_IP, NAT_KEEPALIVE,
+    };
+
+    // Notify numbers are the IANA assignments, not values recalled from prose.
+    assert_eq!(NAT_DETECTION_SOURCE_IP, 16388);
+    assert_eq!(NAT_DETECTION_DESTINATION_IP, 16389);
+
+    // The digest is SHA-1 over SPIi | SPIr | address | port. This vector was
+    // produced with OpenSSL from those exact octets.
+    let spi_i = [0x11u8; 8];
+    let spi_r = [0x22u8; 8];
+    assert_eq!(
+        nat_detection_hash(spi_i, spi_r, &[192, 0, 2, 1], 500),
+        [
+            0xd5, 0x63, 0xe5, 0x8a, 0x48, 0x04, 0x0d, 0x97, 0x9c, 0xa9, 0x0e, 0x6e, 0xc0, 0x5d,
+            0x12, 0x6b, 0x22, 0x9f, 0x8b, 0xc1
+        ]
+    );
+
+    // A peer whose source hash does not match what we observe is behind a NAT.
+    let detector = NatDetector::new(spi_i, spi_r);
+    let local: (&[u8], u16) = (&[192, 0, 2, 10], 500);
+    let observed: (&[u8], u16) = (&[192, 0, 2, 1], 500);
+    let claimed = detector.source_hash(&[10, 0, 0, 1], 4500);
+    let our_address = detector.source_hash(local.0, local.1);
+    let verdict = detector.evaluate(&[claimed], Some(&our_address), observed, local);
+    assert!(verdict.peer_behind_nat);
+    assert!(verdict.needs_encapsulation());
+
+    // No mismatch => no NAT => no encapsulation.
+    let peer_source = detector.source_hash(observed.0, observed.1);
+    let clean = detector.evaluate(&[peer_source], Some(&our_address), observed, local);
+    assert!(!clean.needs_encapsulation());
+    assert!(!clean.needs_keepalive());
+
+    // The two notifies carry those hashes and survive the payload codec.
+    let notifies = nat_detection_notifies(spi_i, [0u8; 8], local, observed);
+    assert_eq!(notifies[0].notify_type, NAT_DETECTION_SOURCE_IP);
+    assert_eq!(notifies[1].notify_type, NAT_DETECTION_DESTINATION_IP);
+    for notify in notifies {
+        let encoded = notify.encode();
+        assert_eq!(epdg::ikev2::Notify::decode(&encoded).unwrap(), notify);
+    }
+
+    // Port 4500 framing: a 4-octet marker in front of IKE, one 0xFF keepalive.
+    let message = vec![0x20u8, 0x20, 0x23, 0x08];
+    let framed = encapsulate(&message);
+    assert_eq!(&framed[..4], &[0, 0, 0, 0]);
+    assert_eq!(decapsulate(&framed), Some(&message[..]));
+    assert!(is_nat_keepalive(&NAT_KEEPALIVE));
+    assert_eq!(decapsulate(&NAT_KEEPALIVE), None);
+}
