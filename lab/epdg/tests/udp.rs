@@ -132,9 +132,13 @@ fn the_ike_exchange_completes_with_udp_encapsulation() {
 
     let plain = UdpSocket::bind("127.0.0.1:0").unwrap();
     let natted = UdpSocket::bind("127.0.0.1:0").unwrap();
+    // The responder polls both ports in turn, and the client moves from the
+    // plain port to the NAT-T port partway through the exchange. A long
+    // timeout here means every port switch stalls the poll for its full
+    // length, so keep it short and let the idle counter measure the silence.
     for socket in [&plain, &natted] {
         socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_millis(50)))
             .unwrap();
     }
     let plain_addr = plain.local_addr().unwrap();
@@ -163,7 +167,7 @@ fn the_ike_exchange_completes_with_udp_encapsulation() {
                     Ok((len, from)) => (len, from, true),
                     Err(_) => {
                         idle += 1;
-                        if idle >= 50 {
+                        if idle >= 100 {
                             return; // ~5 s of silence
                         }
                         continue;
@@ -223,7 +227,18 @@ fn the_ike_exchange_completes_with_udp_encapsulation() {
     client_socket
         .send_to(&client.sa_init_request(), plain_addr)
         .unwrap();
-    let (len, _) = client_socket.recv_from(&mut buf).unwrap();
+    // The responder thread binds its sockets asynchronously, so the first
+    // reply can arrive after one short timeout. Wait like the loop below does.
+    let mut waited = Duration::ZERO;
+    let len = loop {
+        match client_socket.recv_from(&mut buf) {
+            Ok((len, _)) => break len,
+            Err(_) if waited < Duration::from_secs(10) => {
+                waited += Duration::from_millis(200);
+            }
+            Err(e) => panic!("no reply to IKE_SA_INIT: {e}"),
+        }
+    };
     let first_auth = client.on_sa_init_response(&buf[..len]).unwrap();
 
     let mut outbound = Some(first_auth);
