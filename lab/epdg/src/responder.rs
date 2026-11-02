@@ -215,7 +215,14 @@ impl StandInEpdg {
             .clone();
         let seed = skeyseed(&nonce_i, &self.nonce_r, &shared);
         let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
-        self.ike = Some(derive_keys(&seed, &nonce_i, &self.nonce_r, sizes));
+        self.ike = Some(derive_keys(
+            &seed,
+            &nonce_i,
+            &self.nonce_r,
+            self.initiator_spi_value,
+            self.responder_spi,
+            sizes,
+        ));
         self.nonce_i = Some(nonce_i);
 
         let bytes = response.encode();

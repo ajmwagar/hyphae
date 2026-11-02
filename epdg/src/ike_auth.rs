@@ -240,6 +240,29 @@ impl IkeAuthInitiator {
         // An EAP payload drives the authentication.
         if let Some(eap) = message.find(PayloadType::Eap) {
             let parsed = EapPacket::parse(&eap.body)?;
+            // A responder may open with EAP-Request/Identity even though `IDi`
+            // already carries the NAI; answer it before the AKA' challenge.
+            if parsed.code == crate::eap::EAP_REQUEST
+                && parsed.method == Some(crate::eap::EAP_TYPE_IDENTITY)
+            {
+                self.message_id += 1;
+                let identity = crate::eap::EapPacket::response(
+                    parsed.identifier,
+                    crate::eap::EAP_TYPE_IDENTITY,
+                    None,
+                    &self.identity,
+                );
+                let sealed = self.seal(
+                    vec![Payload {
+                        kind: PayloadType::Eap,
+                        critical: false,
+                        body: identity,
+                    }],
+                    iv,
+                )?;
+                return Ok(AuthStep::Send(sealed));
+            }
+
             if parsed.code == EAP_SUCCESS {
                 self.msk = Some(peer.keys().msk.to_vec());
                 self.phase = Phase::AwaitingFinalAuth;
@@ -441,7 +464,7 @@ mod tests {
         let eap = eap_keys(&ck, &ik, NETWORK, IDENTITY, &[0x80, 0x00]).unwrap();
         let seed = skeyseed(&[0x33; 32], &[0x66; 32], &[0x77; 256]);
         let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
-        let keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], sizes);
+        let keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], [0x01; 8], [0x02; 8], sizes);
         let auth = IkeAuthInitiator::new(
             keys.clone(),
             [0x01; 8],
@@ -662,6 +685,38 @@ mod tests {
         let config = config.expect("the ePDG assigned an address");
         assert_eq!(config.internal_ip4_address(), Some([10, 1, 2, 3]));
         assert!(f.auth.is_established());
+    }
+
+    #[test]
+    fn an_eap_identity_request_is_answered_before_the_challenge() {
+        let mut f = fixture();
+        let keys = f.keys.clone();
+        let _ = f.auth.first_request(&f.iv).unwrap();
+
+        // A responder may ask for the identity even though IDi carried the NAI.
+        let mut identity = EapPacket::response(9, crate::eap::EAP_TYPE_IDENTITY, None, b"");
+        identity[0] = EAP_REQUEST;
+        let msg = responder_message(
+            &keys,
+            1,
+            vec![Payload {
+                kind: PayloadType::Eap,
+                critical: false,
+                body: identity,
+            }],
+            &f.iv,
+        );
+        let AuthStep::Send(response) = f.auth.on_response(&msg, &f.iv, &mut f.peer).unwrap() else {
+            panic!("expected an identity response");
+        };
+        assert_eq!(Header::decode(&response).unwrap().0.message_id, 2);
+        let opened = f.auth.sk_out().unwrap().open(&response).unwrap();
+        let eap = EapPacket::parse(&opened.payloads[0].body).unwrap();
+        assert_eq!(eap.code, crate::eap::EAP_RESPONSE);
+        assert_eq!(eap.method, Some(crate::eap::EAP_TYPE_IDENTITY));
+        assert_eq!(eap.attributes, IDENTITY.as_bytes());
+        // The AKA' challenge is still awaited afterwards.
+        assert!(!f.auth.is_established());
     }
 
     #[test]

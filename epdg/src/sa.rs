@@ -189,7 +189,14 @@ impl SaInitInitiator {
         let shared = self.keypair.agree(&ke.key_data)?;
         let seed = skeyseed(&self.nonce_i, &nonce_r, &shared);
         self.responder_spi = Some(message.header.responder_spi);
-        Ok(derive_keys(&seed, &self.nonce_i, &nonce_r, sizes))
+        Ok(derive_keys(
+            &seed,
+            &self.nonce_i,
+            &nonce_r,
+            self.initiator_spi(),
+            message.header.responder_spi,
+            sizes,
+        ))
     }
 
     pub fn nonce_i(&self) -> &[u8] {
@@ -309,7 +316,7 @@ mod tests {
         let initiator_ke = Ke::decode(&request.find(PayloadType::Ke).unwrap().body).unwrap();
         let shared = responder.agree(&initiator_ke.key_data).unwrap();
         let seed = skeyseed(&[0x33; 32], &[0x66; 32], &shared);
-        let r_keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], sizes);
+        let r_keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], [0x11; 8], [0x44; 8], sizes);
         assert_eq!(i_keys, r_keys);
     }
 

@@ -25,6 +25,10 @@ pub const EAP_TYPE_AKA_PRIME: u8 = 50;
 /// EAP method type for EAP-AKA.
 pub const EAP_TYPE_AKA: u8 = 23;
 
+/// EAP method: Identity (RFC 3748 §5.2). A responder may still open with this
+/// even when the NAI already travelled in `IDi`.
+pub const EAP_TYPE_IDENTITY: u8 = 1;
+
 /// EAP-AKA' subtypes (RFC 4187 §10, RFC 5448).
 pub const SUBTYPE_CHALLENGE: u8 = 1;
 pub const SUBTYPE_AUTHENTICATION_REJECT: u8 = 2;

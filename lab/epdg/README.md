@@ -53,6 +53,24 @@ hyphae-epdg: DNS 10.32.0.1
   boundary is not on the wire. `AT_RAND` arrives as 20 octets for a 16-octet
   value.
 
+## Interop notes
+
+Driving the client against strongSwan is possible up to a point, and the point
+is informative:
+
+- strongSwan 6.0.1 **cannot be an ePDG responder**. Its `eap-aka` plugin
+  advertises `EAP_AKA` (type 23) only; `src/libstrongswan/eap/eap.h` defines no
+  type 50, and `grep -rni "aka.prime"` over the tree finds nothing. Wi-Fi
+  calling needs EAP-AKA' (TS 33.402), so a strongSwan peer stops after issuing
+  an AKA challenge.
+- Everything before that *does* interoperate, which is how the three bugs in
+  "What it caught" were found: charon verifies the SK ICV, decrypts, parses
+  `IDi`, matches the NAI to a peer config, and starts EAP.
+
+To interop all the way, the responder needs an EAP-AKA' server — hostapd ships
+one (`eap_server_aka_prime`), reachable from strongSwan through its
+`eap-radius` plugin.
+
 ## What it is not
 
 No rekeying, no liveness check, no NAT-T, a fixed RAND, and — because the crates

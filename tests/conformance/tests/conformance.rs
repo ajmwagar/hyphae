@@ -2124,16 +2124,22 @@ fn epdg_005_ikev2_key_schedule_splits_the_prf_stream() {
     assert_eq!(seed, skeyseed(&ni, &nr, &shared));
     assert_ne!(seed, skeyseed(&nr, &ni, &shared));
 
-    // {SK_d|SK_ai|SK_ar|SK_ei|SK_er|SK_pi|SK_pr} = prf+(SKEYSEED, Ni|Nr).
+    // {SK_d|..|SK_pr} = prf+(SKEYSEED, Ni|Nr|SPIi|SPIr) — RFC 7296 §2.14.
     let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
-    let keys = derive_keys(&seed, &ni, &nr, sizes);
+    let (spi_i, spi_r) = ([0x11u8; 8], [0x44u8; 8]);
+    let keys = derive_keys(&seed, &ni, &nr, spi_i, spi_r, sizes);
+    // Both SPIs feed the expansion, so changing either changes every key.
+    let other = derive_keys(&seed, &ni, &nr, spi_i, [0x45u8; 8], sizes);
+    assert_ne!(keys.sk_d, other.sk_d);
+    assert_ne!(keys.sk_ai, other.sk_ai);
     assert_eq!(keys.sk_d.len(), 32);
     assert_eq!(keys.sk_ei.len(), 16);
     assert_eq!(keys.sk_er.len(), 16);
     assert_eq!(keys.sk_ai.len(), 32);
     assert_eq!(keys.sk_pr.len(), 32);
 
-    let both = [&ni[..], &nr[..]].concat();
+    // The expansion seed carries the SPIs as well as the nonces.
+    let both = [&ni[..], &nr[..], &spi_i[..], &spi_r[..]].concat();
     let material = prf_plus(&seed, &both, 32 + 32 + 32 + 16 + 16 + 32 + 32);
     assert_eq!(keys.sk_d, material[..32]);
     assert_eq!(keys.sk_ai, material[32..64]);
@@ -2219,7 +2225,7 @@ fn epdg_007_ike_sa_init_derives_matching_keys() {
     let ke = Ke::decode(&request.find(PayloadType::Ke).unwrap().body).unwrap();
     let shared = responder.agree(&ke.key_data).unwrap();
     let seed = skeyseed(&[0x33; 32], &[0x66; 32], &shared);
-    let responder_keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], sizes);
+    let responder_keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], [0x11; 8], [0x44; 8], sizes);
     assert_eq!(initiator_keys, responder_keys);
 }
 
@@ -2285,6 +2291,8 @@ fn epdg_009_ike_auth_eap_flow_establishes() {
         &seed,
         &[0x33; 32],
         &[0x66; 32],
+        [0x01; 8],
+        [0x02; 8],
         IkeKeySizes::aes_cbc_128_sha256_128(),
     );
 
