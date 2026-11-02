@@ -7,8 +7,11 @@
 //! 20 ms frame carried, whether in one multi-frame packet or across several.
 
 use crate::packet::RtpPacket;
-use crate::{MediaError, AMR_WB_CLOCK_RATE, AMR_WB_FRAME_SAMPLES, AMR_WB_PAYLOAD_TYPE};
-use codec_amr::rtp::Payload;
+use crate::{
+    MediaError, AMR_NB_CLOCK_RATE, AMR_NB_FRAME_SAMPLES, AMR_NB_PAYLOAD_TYPE, AMR_WB_CLOCK_RATE,
+    AMR_WB_FRAME_SAMPLES, AMR_WB_PAYLOAD_TYPE,
+};
+use codec_amr::rtp::{Band, Payload};
 
 /// Stateless conversion between an AMR payload and its RTP envelope. Bound to a
 /// negotiated payload type and SSRC.
@@ -17,6 +20,10 @@ pub struct AmrRtp {
     pub payload_type: u8,
     pub clock_rate: u32,
     pub ssrc: u32,
+    /// Which AMR variant the payload types are read as.
+    pub band: Band,
+    /// Samples per 20 ms frame in this band.
+    pub frame_samples: usize,
 }
 
 impl AmrRtp {
@@ -26,6 +33,21 @@ impl AmrRtp {
             payload_type: AMR_WB_PAYLOAD_TYPE,
             clock_rate: AMR_WB_CLOCK_RATE,
             ssrc,
+            band: Band::Wb,
+            frame_samples: AMR_WB_FRAME_SAMPLES,
+        }
+    }
+
+    /// Default AMR-NB placement: dynamic PT 96, 8 kHz, caller-chosen SSRC.
+    ///
+    /// This is the codec voicemail and MMS audio normally use.
+    pub fn amr_nb(ssrc: u32) -> Self {
+        Self {
+            payload_type: AMR_NB_PAYLOAD_TYPE,
+            clock_rate: AMR_NB_CLOCK_RATE,
+            ssrc,
+            band: Band::Nb,
+            frame_samples: AMR_NB_FRAME_SAMPLES,
         }
     }
 
@@ -34,17 +56,17 @@ impl AmrRtp {
     /// RFC 4867 §9.1: the timestamp reflects the sampling instant of the first
     /// sample in the payload; 20 ms frames step by 320 ticks at 16 kHz.
     pub fn timestamp_for(&self, index: u32) -> u32 {
-        index * (self.clock_rate * AMR_WB_FRAME_SAMPLES as u32 / 16_000)
+        index * self.frame_samples as u32
     }
 
     /// Wrap an already-built AMR payload as the RTP payload octets.
     pub fn payload_bytes(&self, payload: &Payload) -> Result<Vec<u8>, MediaError> {
-        Ok(payload.to_bytes()?)
+        Ok(payload.to_bytes_in(self.band)?)
     }
 
     /// Parse an incoming AMR RTP payload back into a [`codec_amr`] payload.
     pub fn parse_payload(&self, rtp_payload: &[u8]) -> Result<Payload, MediaError> {
-        Ok(Payload::parse(rtp_payload)?)
+        Ok(Payload::parse_in(self.band, rtp_payload)?)
     }
 }
 
@@ -87,7 +109,7 @@ impl MediaEncoder {
         self.sequence = self.sequence.wrapping_add(1);
         self.timestamp = self
             .timestamp
-            .wrapping_add(frames * AMR_WB_FRAME_SAMPLES as u32);
+            .wrapping_add(frames * self.rtp.frame_samples as u32);
         Ok(packet)
     }
 
@@ -189,5 +211,55 @@ mod tests {
         }
         // Started at 1; after 65538 packets the sequence wrapped past 65535 to 2.
         assert!(seqs.last().copied().unwrap() < 16, "sequence did not wrap");
+    }
+}
+
+#[cfg(test)]
+mod nb_tests {
+    use super::*;
+    use codec_amr::rtp::Frame;
+
+    #[test]
+    fn an_amr_nb_stream_uses_8khz_and_160_sample_frames() {
+        let rtp = AmrRtp::amr_nb(0x1234);
+        assert_eq!(rtp.clock_rate, 8_000);
+        assert_eq!(rtp.frame_samples, 160);
+        assert_eq!(rtp.payload_type, AMR_NB_PAYLOAD_TYPE);
+        // 20 ms of 8 kHz is 160 ticks.
+        assert_eq!(rtp.timestamp_for(0), 0);
+        assert_eq!(rtp.timestamp_for(1), 160);
+        assert_eq!(rtp.timestamp_for(50), 8_000);
+    }
+
+    #[test]
+    fn narrowband_frames_are_parsed_as_narrowband() {
+        let mut encoder = MediaEncoder::new(AmrRtp::amr_nb(7));
+        // 12.2 kbit/s is 31 octets in AMR-NB.
+        let frame = Frame::speech_in(Band::Nb, 7, vec![0x5A; 31], true).unwrap();
+        let payload = Payload::new(7, vec![frame]);
+        let packet = encoder.encode(&payload).unwrap();
+        assert_eq!(packet.payload_type, AMR_NB_PAYLOAD_TYPE);
+        assert_eq!(packet.timestamp, 0);
+
+        let parsed = encoder.rtp.parse_payload(&packet.payload).unwrap();
+        assert_eq!(parsed.speech_modes_in(Band::Nb), vec![7]);
+        assert!(parsed.has_speech_in(Band::Nb));
+
+        // The next frame advances by 160 ticks, not 320.
+        let frame = Frame::speech_in(Band::Nb, 7, vec![0x5A; 31], true).unwrap();
+        let packet = encoder.encode(&Payload::new(7, vec![frame])).unwrap();
+        assert_eq!(packet.timestamp, 160);
+    }
+
+    #[test]
+    fn a_narrowband_sid_frame_is_not_reported_as_speech() {
+        let mut encoder = MediaEncoder::new(AmrRtp::amr_nb(7));
+        let sid = Frame::sid_in(Band::Nb, vec![0u8; 5], true).unwrap();
+        let packet = encoder.encode(&Payload::new(7, vec![sid])).unwrap();
+        let parsed = encoder.rtp.parse_payload(&packet.payload).unwrap();
+        assert!(!parsed.has_speech_in(Band::Nb));
+        // Read as wideband it would look like a 12.2 kbit/s speech frame, which
+        // is exactly why the band comes from the SDP and not the payload.
+        assert!(parsed.has_speech_in(Band::Wb));
     }
 }

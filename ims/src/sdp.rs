@@ -462,6 +462,70 @@ impl Sdp {
     /// Build a lab MTSI offer carrying AMR-WB (payload 116) and optionally
     /// telephone-event. This is negotiation data only; no AMR-WB code exists in
     /// this tree.
+    /// An AMR-NB offer (RFC 4867 &sect;8.1): `AMR/8000`, octet-aligned, the
+    /// narrowband mode set.
+    ///
+    /// This is the codec voicemail and MMS audio normally use, and the one to
+    /// fall back to when the far end does not take AMR-WB.
+    pub fn amr_nb_offer(modes: &[u8], telephone_event: bool, address: &str) -> Self {
+        let mut media = Media {
+            kind: "audio".into(),
+            port: 49170,
+            protocol: "RTP/AVP".into(),
+            formats: if telephone_event {
+                vec!["96".into(), "101".into()]
+            } else {
+                vec!["96".into()]
+            },
+            connection: Some(Connection::ip4(address)),
+            bandwidths: Vec::new(),
+            attributes: vec![
+                Attribute::new("rtpmap", Some("96 AMR/8000/1")),
+                Attribute::new(
+                    "fmtp",
+                    Some(format!(
+                        "96 octet-align=1;mode-set={};mode-change-capability=2;max-red=0",
+                        modes
+                            .iter()
+                            .map(|m| m.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )),
+                ),
+                Attribute::new("rtpmap", Some("101 telephone-event/8000")),
+                Attribute::new("fmtp", Some("101 0-15")),
+                Attribute::new("ptime", Some("20")),
+                Attribute::new("maxptime", Some("240")),
+                Attribute::new("sendrecv", None::<String>),
+            ],
+            other: Vec::new(),
+        };
+        if !telephone_event {
+            media.attributes.retain(|a| {
+                !matches!(a.name.as_str(), "rtpmap" | "fmtp")
+                    || a.value.as_deref() != Some("101 telephone-event/8000")
+                        && a.value.as_deref() != Some("101 0-15")
+            });
+        }
+        Self {
+            origin: Origin {
+                username: "-".into(),
+                session_id: "0".into(),
+                session_version: "0".into(),
+                net_type: "IN".into(),
+                addr_type: "IP4".into(),
+                address: address.into(),
+            },
+            session_name: "-".into(),
+            timing: ("0".into(), "0".into()),
+            connection: Some(Connection::ip4(address)),
+            bandwidths: Vec::new(),
+            attributes: Vec::new(),
+            media: vec![media],
+            other: Vec::new(),
+        }
+    }
+
     pub fn amr_wb_offer(modes: &[u8], telephone_event: bool, address: &str) -> Self {
         let mut media = Media {
             kind: "audio".into(),
@@ -928,5 +992,30 @@ a=confirmed:sendrecv\r\n";
         // The answer still parses as SDP after serialisation.
         let reparsed = Sdp::parse(&answer.to_text()).unwrap();
         assert_eq!(reparsed.media.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod nb_offer_tests {
+    use super::*;
+
+    #[test]
+    fn an_amr_nb_offer_names_the_narrowband_codec() {
+        let sdp = Sdp::amr_nb_offer(&[0, 1, 2, 3, 4, 5, 6, 7], true, "192.0.2.10");
+        let text = sdp.to_text();
+        assert!(text.contains("m=audio 49170 RTP/AVP 96 101"));
+        // RFC 4867 §8.1: AMR/8000, octet-aligned.
+        assert!(text.contains("a=rtpmap:96 AMR/8000/1"));
+        assert!(text.contains("a=fmtp:96 octet-align=1;mode-set=0,1,2,3,4,5,6,7"));
+        assert!(text.contains("a=rtpmap:101 telephone-event/8000"));
+        assert!(text.contains("a=ptime:20"));
+    }
+
+    #[test]
+    fn telephone_event_can_be_left_out() {
+        let sdp = Sdp::amr_nb_offer(&[7], false, "192.0.2.10");
+        let text = sdp.to_text();
+        assert!(text.contains("RTP/AVP 96\r\n") || text.contains("RTP/AVP 96\n"));
+        assert!(!text.contains("telephone-event"));
     }
 }

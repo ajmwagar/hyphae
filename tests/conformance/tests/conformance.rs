@@ -3528,3 +3528,43 @@ fn mwi_001_message_waiting_subscription() {
     // One subscribe above, so this is the second request on the dialog.
     assert_eq!(stop.headers.get("cseq"), Some("2 SUBSCRIBE"));
 }
+
+// --- MEDIA-003: AMR-NB --------------------------------------------------
+
+#[test]
+fn media_003_amr_nb_framing_and_stream() {
+    use codec_amr::rtp::{Band, Frame, FrameKind, Payload};
+    use media::amr_rtp::{AmrRtp, MediaEncoder};
+
+    // RFC 4867 Table 1: AMR-NB octet sizes for FT 0..=7, and FT 8 is SID.
+    let sizes = [12usize, 13, 15, 17, 19, 20, 26, 31];
+    for (ft, want) in sizes.iter().enumerate() {
+        assert_eq!(Band::Nb.frame_size(ft as u8), Some(*want));
+        assert_eq!(
+            Band::Nb.classify(ft as u8),
+            FrameKind::Speech { mode: ft as u8 }
+        );
+    }
+    assert_eq!(Band::Nb.frame_size(8), Some(5));
+    assert_eq!(Band::Nb.classify(8), FrameKind::Sid);
+
+    // The trap the band exists to prevent: FT 8 is speech in AMR-WB.
+    assert_eq!(Band::Wb.classify(8), FrameKind::Speech { mode: 8 });
+    assert_eq!(Band::Wb.classify(9), FrameKind::Sid);
+
+    // A narrowband RTP stream runs at 8 kHz with 20 ms / 160-sample frames.
+    let mut encoder = MediaEncoder::new(AmrRtp::amr_nb(0x1234));
+    let frame = Frame::speech_in(Band::Nb, 7, vec![0x5A; 31], true).unwrap();
+    let packet = encoder.encode(&Payload::new(7, vec![frame])).unwrap();
+    assert_eq!(packet.payload_type, 96);
+    assert_eq!(packet.timestamp, 0);
+    let second = Frame::speech_in(Band::Nb, 7, vec![0x5A; 31], true).unwrap();
+    let packet = encoder.encode(&Payload::new(7, vec![second])).unwrap();
+    assert_eq!(packet.timestamp, 160);
+
+    // And the SDP offer names the narrowband codec.
+    let sdp = ims::Sdp::amr_nb_offer(&[0, 1, 2, 3, 4, 5, 6, 7], true, "192.0.2.10");
+    let text = sdp.to_text();
+    assert!(text.contains("a=rtpmap:96 AMR/8000/1"));
+    assert!(text.contains("octet-align=1"));
+}
