@@ -17,6 +17,7 @@ pub mod call;
 pub mod continuity;
 pub mod dialog;
 pub mod emergency;
+pub mod ims3gpp;
 pub mod keepalive;
 pub mod pani;
 pub mod pcscf;
