@@ -134,8 +134,9 @@ cargo run -p ims --example register_flow   # prints the exact REGISTER ladder
 ```
 
 The example does not open a socket; it prints the bytes the transport would
-send. A real REGISTER needs a transport adapter (phase 3) plus the USIM AKA
-path. The expected sequence is:
+send. For a real REGISTER over a socket, run `cd lab/pris && ./run.sh`, which
+drives the UDP transport, the USIM AKA path and a digest-checking P-CSCF
+stand-in. The expected sequence is:
 
 ```text
 client → P-CSCF   REGISTER (Security-Client, Contact, Expires, feature tag)
@@ -192,7 +193,7 @@ Success criteria:
 | 401 loops forever | K/OP mismatch between USIM and HSS; wrong RES encoding |
 | `Security-Client` rejected | P-CSCF IPsec profile/SPI mismatch; try `ealg=null` and a test SPI first |
 | No P-CSCF resolution | DNS zone/hosts missing, or client still on `static` pointing at the wrong address |
-| Media not establishing | expected: RTP/RTCP and IPsec are phase 3 TODO; this scaffold is control-plane only |
+| Media not establishing | this lab covers signalling only: `media` frames RTP/RTCP but no codec is attached, and Gm IPsec is only installed on Linux (the lab does not require it) |
 | `cargo test` tries the lab | it should not; default tests use `transport::MockTransport` and no network |
 
 ## Legal / safety

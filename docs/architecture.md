@@ -6,16 +6,16 @@
 +---------------------------- application / UI ----------------------------+
 |                                                                          |
 |   ims        registration state, IMS profile, SDP offer/answer,          |
-|              dialog construction (PRACK / UPDATE / BYE)                  |
+|              dialogs, MO/MT calls, SMS, emergency request construction   |
 |     |                |                          |                        |
 |     | sip::Message   | codec::Codec             | transport::Transport   |
 |     v                v                          v                        |
 |   sip          codec (trait, Opus only)     transport (trait, mock)      |
-|   RFC 3261     PCM frames in/out             UDP/TCP later; AT/QMI now;  |
-|   no I/O                                     MBIM / CCCI boundary       |
+|   RFC 3261     PCM frames in/out            UDP/TCP, AT/QMI, MBIM,       |
+|   no I/O                                    CCCI boundary, ESP/IPsec     |
 |                                                                          |
-|   aka          RFC 3310 / Milenage, pure functions over USIM output       |
-|   carrier      TOML profiles keyed by MCC/MNC (data only)                 |
+|   aka / usim   RFC 3310 / Milenage / TS 31.102 AUTHENTICATE (no I/O)     |
+|   carrier      TOML profiles keyed by MCC/MNC (data only)                |
 +--------------------------------------------------------------------------+
 ```
 
@@ -87,9 +87,10 @@ patent-noticed packages or device-local retrofit services. See
 | Backend | Status | Shape |
 |---|---|---|
 | `MockTransport` | in tree | in-memory channels; used by all tests |
-| UDP/TCP/TLS | TODO | `std::net` adapter; TLS is a later dependency decision |
-| AT command channel | TODO (phase 3) | adapter that writes SIP over the modem's IMS PDN or AT tunnel; does not change `ims` |
-| QMI | TODO (phase 3) | IMS PDN + P-CSCF/PCO discovery; adapter supplies `ImsProfile` |
+| UDP/TCP | in tree | `std::net` adapter (`transport::net`); TLS is a later dependency decision |
+| IPsec (Gm) | in tree | `transport::esp` + `transport::ipsec`; Linux XFRM installs the SAs, other platforms report unsupported |
+| AT command channel | modelled | adapter that writes SIP over the modem's IMS PDN or AT tunnel; does not change `ims` |
+| QMI | modelled | IMS PDN + P-CSCF/PCO discovery; adapter supplies `ImsProfile` |
 | MBIM | modelled | control-frame wire shape + IMS PDN session; local addr is modem-assigned |
 | MTK CCCI | boundary only | `VendorChannel` trait + this tree's own length framing; no vendor code copied |
 
