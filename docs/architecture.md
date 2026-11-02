@@ -168,6 +168,13 @@ frames. This module is the seam:
 On modem-side IMS the AP never touches call audio; this seam exists for the
 AP-side path, where the modem's voice PCM has to reach userspace.
 
+**Wi-Fi calling (ePDG).** The alternative to VoLTE is an IKEv2 tunnel to an
+ePDG authenticated with EAP-AKA'. The crypto core is in
+`aka::eap_aka_prime`: `CK'/IK'` bound to the access-network name, the RFC 5448
+`PRF'` expansion into `K_encr`/`K_aut`/`K_re`/`MSK`/`EMSK`, the AT attribute
+framing and `AT_MAC`. The IKEv2 exchange and the S2b bearer are not implemented
+yet; this is the part that reuses the AKA keys the client already has.
+
 ## 7. ARM-first targets
 
 First devices are 32-bit ARM (TCL 4058G, armv7l) and 64-bit ARM (CAT S22
