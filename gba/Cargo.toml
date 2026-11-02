@@ -8,4 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 aka.workspace = true
+base64.workspace = true
 carrier.workspace = true
+usim.workspace = true

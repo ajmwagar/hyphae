@@ -32,6 +32,7 @@ rust-version = "1.85"
 # Cryptographic primitives come from RustCrypto. The protocol logic (Milenage,
 # EAP-AKA', IKEv2, ESP framing) is ours; the primitives are not.
 aes = "0.8"
+base64 = "0.22"
 sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"

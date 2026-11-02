@@ -46,6 +46,7 @@ pub fn authorization_value(
         nc,
         cnonce,
         qop,
+        entity_body: None,
     });
 
     let mut out = format!(
@@ -76,6 +77,7 @@ mod tests {
             nc: "00000001",
             cnonce: "0a4f113b",
             qop: Some("auth"),
+            entity_body: None,
         });
         assert_eq!(r.len(), 32);
         assert!(r

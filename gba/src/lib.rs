@@ -20,6 +20,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod http;
+pub mod ub;
+
 pub use carrier::PlmnId;
 
 use aka::kdf;
@@ -50,6 +53,10 @@ pub enum GbaError {
     NonAscii(&'static str),
     /// A KDF parameter was too long, or `FC` was malformed.
     Kdf(kdf::KdfError),
+    /// The Ub exchange with the BSF failed.
+    Ub(String),
+    /// The USIM could not run the AKA challenge.
+    Usim(String),
 }
 
 impl core::fmt::Display for GbaError {
@@ -59,6 +66,8 @@ impl core::fmt::Display for GbaError {
             GbaError::EmptyDomain => write!(f, "IMPI domain is empty"),
             GbaError::NonAscii(what) => write!(f, "{what} must be ASCII"),
             GbaError::Kdf(e) => write!(f, "KDF input: {e}"),
+            GbaError::Ub(why) => write!(f, "Ub: {why}"),
+            GbaError::Usim(why) => write!(f, "USIM: {why}"),
         }
     }
 }
@@ -188,6 +197,36 @@ pub fn ks_int_naf(
     naf_id: &[u8],
 ) -> Result<[u8; kdf::OUTPUT_LEN], GbaError> {
     naf_key(ks, rand, impi, naf_id, LABEL_GBA_U)
+}
+
+/// The RFC 3310 digest used by both Ub and Ua.
+///
+/// `entity_body` is hashed only under `qop=auth-int`, which is what Ub uses;
+/// Ua's `qop` comes from the NAF and may be `auth`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn digest(
+    username: &str,
+    realm: &str,
+    res: &[u8],
+    method: &str,
+    uri: &str,
+    nonce: &str,
+    cnonce: &str,
+    qop: &str,
+    entity_body: &[u8],
+) -> String {
+    aka::digest::digest_response(&aka::digest::DigestInput {
+        impi: username,
+        realm,
+        res,
+        method,
+        digest_uri: uri,
+        nonce,
+        nc: "00000001",
+        cnonce,
+        qop: Some(qop),
+        entity_body: Some(entity_body),
+    })
 }
 
 #[cfg(test)]

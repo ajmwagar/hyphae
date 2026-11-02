@@ -1,7 +1,8 @@
 # ADR: GBA (TS 33.220) for carrier entitlement — deferred
 
-**Status:** protocol half implemented (`gba` crate, GBA-001/002); Ub/Ua
-deferred (GBA-003) · **Scope:** any carrier-facing provisioning or entitlement
+**Status:** `gba` implements the BSF discovery (GBA-001), the NAF key
+derivation (GBA-002) and the Ub exchange with a BSF (GBA-003); Ua remains
+deferred (GBA-004) · **Scope:** any carrier-facing provisioning or entitlement
 step that sits *outside* the 3GPP ePDG/IMS protocols.
 
 ## Context
