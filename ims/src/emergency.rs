@@ -41,6 +41,104 @@ use sip::{Header, Headers, Method, Request};
 /// The root emergency service URN (RFC 5031 §3.2).
 pub const SOS_ROOT: &str = "urn:service:sos";
 
+/// The info package name for current-location discovery during an emergency
+/// call (TS 24.229 §5.1.6.12.2, quoted in the `Info-Package` header).
+pub const CURRENT_LOCATION_INFO_PACKAGE: &str = "g.3gpp.current-location-discovery";
+
+/// The MIME type of the `requestForLocationInformation` body (TS 24.229
+/// §7.12.2.2.4) and of the `Accept` we offered in the INVITE.
+pub const CURRENT_LOCATION_MIME: &str = "application/vnd.3gpp.current-location-discovery+xml";
+
+/// The presence event package (RFC 3856), used as the `Event` of the location
+/// PUBLISH (RFC 3903 §4 requires one).
+pub const LOCATION_EVENT_PACKAGE: &str = "presence";
+
+/// A `requestForLocationInformation` received inside an emergency dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocationRequest {
+    /// The request asked for a single update (`<oneShot/>`, §7.12.2.2.4).
+    pub one_shot: bool,
+}
+
+/// Recognise a current-location INFO request (TS 24.229 §5.1.6.12.2).
+///
+/// Returns `None` for anything that is not exactly that request: the method
+/// must be INFO, `Info-Package` must name the current-location package,
+/// `Content-Type` must be the matching XML type, and the body must be a
+/// `requestForLocationInformation` document. Being strict matters here — the
+/// answer is the user's location, and it must not be sent in response to
+/// something we merely think is a location request.
+pub fn parse_location_request(request: &sip::Request) -> Option<LocationRequest> {
+    if request.method != sip::Method::Info {
+        return None;
+    }
+    if !request
+        .headers
+        .get("info-package")?
+        .split(',')
+        .any(|p| p.trim().eq_ignore_ascii_case(CURRENT_LOCATION_INFO_PACKAGE))
+    {
+        return None;
+    }
+    if !request
+        .headers
+        .get("content-type")?
+        .to_ascii_lowercase()
+        .contains(CURRENT_LOCATION_MIME)
+    {
+        return None;
+    }
+    let body = core::str::from_utf8(&request.body).ok()?;
+    if !body.contains("<requestForLocationInformation") {
+        return None;
+    }
+    Some(LocationRequest {
+        one_shot: body.contains("<oneShot"),
+    })
+}
+
+/// Render a PIDF document that carries **no** location object.
+///
+/// TS 24.229 §5.1.6.12.3: when the UE has no location and is not going to get
+/// one, it still publishes — with a PIDF body that contains no location. That
+/// is how the network learns to stop asking, which is better than silence.
+pub fn pidf_without_location(entity: &str) -> String {
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<presence xmlns=\"urn:ietf:params:xml:ns:pidf\" entity=\"{entity}\">\n",
+            "  <tuple id=\"loc1\">\n",
+            "    <status>\n",
+            "      <basic>closed</basic>\n",
+            "    </status>\n",
+            "  </tuple>\n",
+            "</presence>\n"
+        ),
+        entity = entity
+    )
+}
+
+/// Build the in-dialog PUBLISH that reports the current location
+/// (TS 24.229 §5.1.6.12.3).
+///
+/// `location` is `None` when the UE has no fix and will not obtain one; the
+/// PUBLISH is still sent, with [`pidf_without_location`].
+pub fn location_publish(
+    dialog: &mut crate::Dialog,
+    entity: &str,
+    location: Option<Geolocation>,
+) -> sip::Request {
+    let body = match location {
+        Some(location) => location.to_pidf_lo(entity),
+        None => pidf_without_location(entity),
+    };
+    dialog.publish(
+        LOCATION_EVENT_PACKAGE,
+        "application/pidf+xml",
+        body.into_bytes(),
+    )
+}
+
 /// The IANA-registered emergency services under `urn:service:sos`.
 ///
 /// Source: RFC 5031 §3.2 (the `sos.` subtree).
@@ -1059,5 +1157,118 @@ mod tests {
             .starts_with("\"Anonymous\""));
         assert!(req.headers.get("p-preferred-identity").is_some());
         assert!(!req.headers.get("via").unwrap().contains(";keep"));
+    }
+
+    fn location_info(body: &str) -> sip::Request {
+        let mut headers = Headers::new();
+        headers.push(Header::new("Via", "SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-x"));
+        headers.push(Header::new("From", "<sip:psap@ims.example>;tag=a"));
+        headers.push(Header::new("To", "<sip:001010000000001@ims.example>;tag=b"));
+        headers.push(Header::new("Call-ID", "c"));
+        headers.push(Header::new("CSeq", "2 INFO"));
+        headers.push(Header::new("Info-Package", CURRENT_LOCATION_INFO_PACKAGE));
+        headers.push(Header::new("Content-Type", CURRENT_LOCATION_MIME));
+        sip::Request {
+            method: Method::Info,
+            uri: "sip:001010000000001@ims.example".into(),
+            headers,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    const ONE_SHOT: &str = r#"<?xml version="1.0"?>
+<requestForLocationInformation><oneShot/></requestForLocationInformation>"#;
+
+    #[test]
+    fn a_current_location_info_request_is_recognised() {
+        assert_eq!(
+            parse_location_request(&location_info(ONE_SHOT)),
+            Some(LocationRequest { one_shot: true })
+        );
+    }
+
+    #[test]
+    fn a_lookalike_request_is_not() {
+        // Wrong method.
+        let mut req = location_info(ONE_SHOT);
+        req.method = Method::Message;
+        assert_eq!(parse_location_request(&req), None);
+
+        // Wrong info package.
+        let mut req = location_info(ONE_SHOT);
+        req.headers.set("Info-Package", "g.3gpp.app_ref");
+        assert_eq!(parse_location_request(&req), None);
+
+        // Wrong body type.
+        let mut req = location_info(ONE_SHOT);
+        req.headers.set("Content-Type", "application/sdp");
+        assert_eq!(parse_location_request(&req), None);
+
+        // Right headers, body that is not the document.
+        let mut req = location_info("<something-else/>");
+        req.headers.set("Content-Type", CURRENT_LOCATION_MIME);
+        assert_eq!(parse_location_request(&req), None);
+    }
+
+    fn emergency_dialog() -> crate::Dialog {
+        let mut d = crate::Dialog::new(
+            "call-1",
+            "sip:001010000000001@ims.example",
+            "sip:psap@ims.example",
+            "local-tag",
+            "remote-tag",
+            "sip:001010000000001@192.0.2.10:5060",
+        );
+        d.confirm();
+        d
+    }
+
+    #[test]
+    fn the_location_publish_is_an_in_dialog_presence_publish() {
+        let mut dialog = emergency_dialog();
+        let before = dialog.cseq;
+        let request = location_publish(
+            &mut dialog,
+            "sip:001010000000001@ims.example",
+            Some(Geolocation::new(51.5, -0.12).unwrap()),
+        );
+        assert_eq!(request.method, Method::Publish);
+        assert_eq!(dialog.cseq, before + 1);
+        // RFC 3903 §4: PUBLISH needs an Event header; this is a presence
+        // publication (RFC 3856).
+        assert_eq!(request.headers.get("event"), Some(LOCATION_EVENT_PACKAGE));
+        assert_eq!(
+            request.headers.get("content-type"),
+            Some("application/pidf+xml")
+        );
+        // In-dialog: both tags, the caller's Call-ID.
+        assert!(request
+            .headers
+            .get("from")
+            .unwrap()
+            .contains("tag=local-tag"));
+        assert!(request
+            .headers
+            .get("to")
+            .unwrap()
+            .contains("tag=remote-tag"));
+        assert_eq!(request.headers.get("call-id"), Some("call-1"));
+        let body = String::from_utf8(request.body.clone()).unwrap();
+        assert!(body.contains("<gml:pos>51.500000 -0.120000</gml:pos>"));
+        assert_eq!(
+            request.headers.get("content-length"),
+            Some(request.body.len().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn no_location_still_publishes_but_carries_no_location_object() {
+        let mut dialog = emergency_dialog();
+        let request = location_publish(&mut dialog, "sip:001010000000001@ims.example", None);
+        let body = String::from_utf8(request.body).unwrap();
+        // §5.1.6.12.3 NOTE: a PIDF body with no location object.
+        assert!(body.contains("<presence"));
+        assert!(!body.contains("location-info"));
+        assert!(!body.contains("<gml:pos>"));
     }
 }

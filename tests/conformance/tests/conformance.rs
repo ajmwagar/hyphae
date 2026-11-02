@@ -3187,3 +3187,92 @@ fn e911_004_unauthenticated_emergency_fallback() {
     .register("sip:ims.example", "192.0.2.10", 5060);
     assert!(reg.headers.get("contact").unwrap().contains(";sos>"));
 }
+
+// --- E911-005: current location discovery during a call -----------------
+
+#[test]
+fn e911_005_current_location_discovery_during_a_call() {
+    use ims::emergency::{
+        location_publish, parse_location_request, LocationRequest, CURRENT_LOCATION_INFO_PACKAGE,
+        CURRENT_LOCATION_MIME, LOCATION_EVENT_PACKAGE,
+    };
+
+    // TS 24.229 §7.12.2.2: the request body is a
+    // requestForLocationInformation with a oneShot element.
+    let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<requestForLocationInformation><oneShot/></requestForLocationInformation>"#;
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new(
+        "Via",
+        "SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-p",
+    ));
+    headers.push(sip::Header::new("From", "<sip:psap@ims.example>;tag=a"));
+    headers.push(sip::Header::new(
+        "To",
+        "<sip:001010000000001@ims.example>;tag=b",
+    ));
+    headers.push(sip::Header::new("Call-ID", "call-1"));
+    headers.push(sip::Header::new("CSeq", "2 INFO"));
+    headers.push(sip::Header::new(
+        "Info-Package",
+        CURRENT_LOCATION_INFO_PACKAGE,
+    ));
+    headers.push(sip::Header::new("Content-Type", CURRENT_LOCATION_MIME));
+    let info = sip::Request {
+        method: sip::Method::Info,
+        uri: "sip:001010000000001@ims.example".into(),
+        headers: headers.clone(),
+        body: body.as_bytes().to_vec(),
+    };
+
+    assert_eq!(
+        parse_location_request(&info),
+        Some(LocationRequest { one_shot: true })
+    );
+    assert_eq!(
+        CURRENT_LOCATION_INFO_PACKAGE,
+        "g.3gpp.current-location-discovery"
+    );
+
+    // §5.1.6.12.3: the answer is published into the same dialog. RFC 3903 §4
+    // requires an Event header, and the publication is a presence one.
+    let mut dialog = ims::Dialog::new(
+        "call-1",
+        "sip:001010000000001@ims.example",
+        "sip:psap@ims.example",
+        "b",
+        "a",
+        "sip:001010000000001@192.0.2.10:5060",
+    );
+    dialog.confirm();
+    let publish = location_publish(
+        &mut dialog,
+        "sip:001010000000001@ims.example",
+        Some(ims::emergency::Geolocation::new(51.5, -0.12).unwrap()),
+    );
+    assert_eq!(publish.method, sip::Method::Publish);
+    assert_eq!(publish.headers.get("event"), Some(LOCATION_EVENT_PACKAGE));
+    assert_eq!(
+        publish.headers.get("content-type"),
+        Some("application/pidf+xml")
+    );
+    assert_eq!(publish.headers.get("call-id"), Some("call-1"));
+    let text = String::from_utf8(publish.body).unwrap();
+    assert!(text.contains("<gml:pos>51.500000 -0.120000</gml:pos>"));
+
+    // Without a fix the UE still publishes, with no location object, so the
+    // network stops asking instead of waiting.
+    let mut dialog = ims::Dialog::new(
+        "call-1",
+        "sip:001010000000001@ims.example",
+        "sip:psap@ims.example",
+        "b",
+        "a",
+        "sip:001010000000001@192.0.2.10:5060",
+    );
+    dialog.confirm();
+    let publish = location_publish(&mut dialog, "sip:001010000000001@ims.example", None);
+    let text = String::from_utf8(publish.body).unwrap();
+    assert!(text.contains("<presence"));
+    assert!(!text.contains("location-info"));
+}

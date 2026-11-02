@@ -195,6 +195,27 @@ impl Dialog {
         req
     }
 
+    /// In-dialog PUBLISH (RFC 3903) carrying a body, e.g. an updated PIDF-LO
+    /// during an emergency call (TS 24.229 §5.1.6.12.3).
+    ///
+    /// `event` is the event package name: RFC 3903 §4 makes the `Event` header
+    /// mandatory, and the location publication is a presence publication, so
+    /// callers normally pass `presence` (RFC 3856).
+    pub fn publish(&mut self, event: &str, content_type: &str, body: Vec<u8>) -> Request {
+        let uri = self
+            .route_set
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.remote_uri.clone());
+        self.cseq += 1;
+        let mut req = self.request(Method::Publish, uri, self.cseq);
+        req.headers.push(Header::new("Event", event));
+        req.headers.push(Header::new("Content-Type", content_type));
+        req.headers.set("Content-Length", body.len().to_string());
+        req.body = body;
+        req
+    }
+
     /// In-dialog BYE: RFC 3261 §15.
     pub fn bye(&mut self) -> Request {
         let uri = self
