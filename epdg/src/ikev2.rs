@@ -294,6 +294,9 @@ impl Message {
 // --- SA -------------------------------------------------------------------
 
 /// IPsec protocol id for ESP (RFC 7296 §3.3).
+/// Protocol ID for an IKE SA proposal (RFC 7296 §3.3). `SAi1`/`SAr1` use this;
+/// only child-SA proposals use [`PROTO_ESP`].
+pub const PROTO_IKE: u8 = 1;
 pub const PROTO_ESP: u8 = 3;
 /// IPsec protocol id for AH.
 pub const PROTO_AH: u8 = 2;
@@ -682,7 +685,7 @@ mod tests {
                                 Transform {
                                     transform_type: TRANSFORM_ENCR,
                                     id: 12,
-                                    attributes: vec![],
+                                    attributes: vec![0x80, 0x0E, 0x00, 0x80],
                                 },
                                 Transform {
                                     transform_type: TRANSFORM_PRF,

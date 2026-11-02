@@ -103,10 +103,12 @@ impl Sk {
     /// implementation uses a fresh random IV per message.
     pub fn seal(&self, header: Header, payloads: &[Payload], iv: &[u8; BLOCK_LEN]) -> Vec<u8> {
         let inner = encode_payloads(payloads);
-        // plaintext = payloads || padding || pad length
+        // RFC 7296 §3.14: plaintext = payloads || padding, and the last byte of
+        // the padding field holds the padding length. There is no trailing
+        // next-payload byte; the chain ends inside the payloads.
         let pad_len = (BLOCK_LEN - ((inner.len() + 1) % BLOCK_LEN)) % BLOCK_LEN;
         let mut plaintext = inner;
-        plaintext.extend(std::iter::repeat_n(0u8, pad_len));
+        plaintext.resize(plaintext.len() + pad_len, 0);
         plaintext.push(pad_len as u8);
 
         let ciphertext = self.cbc_encrypt(&plaintext, iv);
@@ -234,14 +236,8 @@ impl Sk {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.ct_eq(b))
 }
 
 #[cfg(test)]

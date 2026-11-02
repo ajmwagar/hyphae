@@ -69,14 +69,8 @@ pub fn child_keymat(sk_d: &[u8], nonce_i: &[u8], nonce_r: &[u8], len: usize) -> 
 
 /// Constant-time equality for MAC comparisons.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.ct_eq(b))
 }
 
 #[cfg(test)]

@@ -165,6 +165,18 @@ impl UeClient {
     /// Consume the IKE_SA_INIT response and build the first IKE_AUTH.
     pub fn on_sa_init_response(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
         let message = Message::decode(bytes).map_err(|e| ClientError::Decode(e.to_string()))?;
+        if std::env::var("EPDG_LAB_DEBUG").is_ok() {
+            let nonce = message
+                .find(PayloadType::Nonce)
+                .map(|p| p.body.clone())
+                .unwrap_or_default();
+            eprintln!(
+                "debug: sa_init response payloads={:?} nonce_r_len={} nonce_i_len={}",
+                message.payloads.iter().map(|p| p.kind).collect::<Vec<_>>(),
+                nonce.len(),
+                self.nonce_i().len()
+            );
+        }
         // `on_response` needs the Message, and the raw bytes for SignedOctets.
         let keys = self
             .sa

@@ -198,6 +198,25 @@ the key chain agreed, not that both sides used one fixture.
 Not implemented yet: the PC/SC adapter that would put a real USIM behind the
 same driver.
 
+### Cryptographic primitives
+
+No primitive is implemented in this tree. AES, SHA-1, SHA-256, HMAC and
+constant-time comparison come from RustCrypto; the accepted cost is five small
+pure-Rust dependencies, and the accepted benefit is that a primitive is never
+validated only against itself.
+
+That distinction is not academic. Hand-written AES, SHA-256 and HMAC passed
+every test in the tree for months, because the only peers they ever talked to
+were each other. They were replaced after an independent IKEv2 implementation
+disagreed; each is now pinned to a published vector (FIPS 197, RFC 4231,
+RFC 2202, RFC 3174) rather than to a round-trip.
+
+The MODP modular exponentiation still comes from `num-bigint`, which is *not*
+constant-time. The only secret it handles is the per-session Diffie-Hellman
+private exponent, so the exposure is bounded by how many handshakes an attacker
+can drive; replacing it with `crypto-bigint` is tracked as a known limitation
+rather than silently ignored.
+
 ## 7. ARM-first targets
 
 First devices are 32-bit ARM (TCL 4058G, armv7l) and 64-bit ARM (CAT S22
