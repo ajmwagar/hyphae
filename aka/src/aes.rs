@@ -103,6 +103,66 @@ pub fn encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     state
 }
 
+/// Multiply in GF(2^8) with the AES polynomial.
+fn gmul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0u8;
+    for _ in 0..8 {
+        if b & 1 != 0 {
+            p ^= a;
+        }
+        let hi = a & 0x80 != 0;
+        a <<= 1;
+        if hi {
+            a ^= 0x1b;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+fn inv_sub_bytes(state: &mut [u8; 16]) {
+    for b in state {
+        *b = SBOX.iter().position(|&x| x == *b).unwrap_or(0) as u8;
+    }
+}
+
+fn inv_shift_rows(state: &mut [u8; 16]) {
+    let old = *state;
+    for row in 0..4 {
+        for col in 0..4 {
+            state[row + 4 * col] = old[row + 4 * ((col + 4 - row) % 4)];
+        }
+    }
+}
+
+fn inv_mix_columns(state: &mut [u8; 16]) {
+    for c in 0..4 {
+        let i = c * 4;
+        let a = [state[i], state[i + 1], state[i + 2], state[i + 3]];
+        state[i] = gmul(a[0], 0x0e) ^ gmul(a[1], 0x0b) ^ gmul(a[2], 0x0d) ^ gmul(a[3], 0x09);
+        state[i + 1] = gmul(a[0], 0x09) ^ gmul(a[1], 0x0e) ^ gmul(a[2], 0x0b) ^ gmul(a[3], 0x0d);
+        state[i + 2] = gmul(a[0], 0x0d) ^ gmul(a[1], 0x09) ^ gmul(a[2], 0x0e) ^ gmul(a[3], 0x0b);
+        state[i + 3] = gmul(a[0], 0x0b) ^ gmul(a[1], 0x0d) ^ gmul(a[2], 0x09) ^ gmul(a[3], 0x0e);
+    }
+}
+
+/// Decrypt one 16-byte block with AES-128 (needed for IKEv2 AES-CBC).
+pub fn decrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
+    let schedule = expand_key(key);
+    let mut state = *block;
+    add_round_key(&mut state, &schedule[160..176]);
+    for round in (1..10).rev() {
+        inv_shift_rows(&mut state);
+        inv_sub_bytes(&mut state);
+        add_round_key(&mut state, &schedule[round * 16..round * 16 + 16]);
+        inv_mix_columns(&mut state);
+    }
+    inv_shift_rows(&mut state);
+    inv_sub_bytes(&mut state);
+    add_round_key(&mut state, &schedule[..16]);
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +188,23 @@ mod tests {
         let key = [0u8; 16];
         let ct = encrypt_block(&key, &[0u8; 16]);
         assert_eq!(ct, h("66e94bd4ef8a2c3b884cfa59ca342b2e"));
+    }
+
+    #[test]
+    fn decrypt_is_the_inverse_of_encrypt() {
+        for seed in 0u8..8 {
+            let mut key = [0u8; 16];
+            key[0] = seed;
+            let mut pt = [0u8; 16];
+            pt[15] = seed.wrapping_mul(17);
+            let ct = encrypt_block(&key, &pt);
+            assert_eq!(decrypt_block(&key, &ct), pt, "seed {seed}");
+        }
+        // FIPS-197 C.1 ciphertext decrypts to the known plaintext.
+        let key = h("000102030405060708090a0b0c0d0e0f");
+        assert_eq!(
+            decrypt_block(&key, &h("69c4e0d86a7b0430d8cdb78070b4c55a")),
+            h("00112233445566778899aabbccddeeff")
+        );
     }
 }
