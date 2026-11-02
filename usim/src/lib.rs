@@ -80,6 +80,8 @@ pub enum UsimError {
     MacFailure,
     /// The channel was closed.
     Closed,
+    /// The card/reader transport failed (PC/SC, modem channel, ...).
+    Channel(String),
 }
 
 impl core::fmt::Display for UsimError {
@@ -92,6 +94,7 @@ impl core::fmt::Display for UsimError {
             UsimError::Malformed(what) => write!(f, "malformed USIM response: {what}"),
             UsimError::MacFailure => f.write_str("USIM rejected the AUTN MAC (MAC-A mismatch)"),
             UsimError::Closed => f.write_str("USIM channel closed"),
+            UsimError::Channel(why) => write!(f, "USIM channel error: {why}"),
         }
     }
 }

@@ -288,111 +288,29 @@ impl EspSa {
 
 /// Constant-time comparison (avoid leaking ICV match position through timing).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.ct_eq(b))
 }
 
 /// HMAC-MD5 (RFC 2104) with a 64-byte block.
 fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
-    let mut block = [0u8; 64];
-    if key.len() > 64 {
-        block[..16].copy_from_slice(&md5_digest(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner = Vec::with_capacity(64 + data.len());
-    let mut outer = Vec::with_capacity(64 + 16);
-    for b in block.iter() {
-        inner.push(b ^ 0x36);
-        outer.push(b ^ 0x5c);
-    }
-    inner.extend_from_slice(data);
-    outer.extend_from_slice(&md5_digest(&inner));
-    md5_digest(&outer)
-}
-
-fn md5_digest(data: &[u8]) -> [u8; 16] {
-    md5::compute(data).0
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        <Hmac<md5::Md5> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
 }
 
 /// HMAC-SHA-1 (RFC 2104) with a 64-byte block.
 fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
-    let mut block = [0u8; 64];
-    if key.len() > 64 {
-        block[..20].copy_from_slice(&sha1(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner = Vec::with_capacity(64 + data.len());
-    let mut outer = Vec::with_capacity(64 + 20);
-    for b in block.iter() {
-        inner.push(b ^ 0x36);
-        outer.push(b ^ 0x5c);
-    }
-    inner.extend_from_slice(data);
-    outer.extend_from_slice(&sha1(&inner));
-    sha1(&outer)
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        <Hmac<sha1::Sha1> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
 }
 
 /// Minimal SHA-1 (FIPS 180-4). Only used for HMAC-SHA-1-96.
-fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-    let mut message = data.to_vec();
-    let bit_len = (data.len() as u64) * 8;
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in message.chunks_exact(64) {
-        let mut w = [0u32; 80];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | (!b & d), 0x5A827999),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
-                _ => (b ^ c ^ d, 0xCA62C1D6),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-    }
-
-    let mut out = [0u8; 20];
-    for (i, v) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,14 +399,18 @@ mod tests {
 
     #[test]
     fn sha1_and_hmac_vectors() {
-        // RFC 3174 §7.3: SHA-1("abc").
-        assert_eq!(
-            sha1(b"abc"),
-            [
-                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
-                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
-            ]
-        );
+        // RFC 3174 §7.3: SHA-1("abc"), through the SHA-1 dependency.
+        {
+            use sha1::Digest;
+            let digest: [u8; 20] = sha1::Sha1::digest(b"abc").into();
+            assert_eq!(
+                digest,
+                [
+                    0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78,
+                    0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
+                ]
+            );
+        }
         // RFC 2202 §3, test case 1: HMAC-SHA-1 with 20-byte 0x0b key.
         let key = [0x0b; 20];
         assert_eq!(

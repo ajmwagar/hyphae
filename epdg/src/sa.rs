@@ -16,7 +16,7 @@
 use crate::dh::{DhError, DhKeyPair};
 use crate::ikev2::{
     ExchangeType, Header, IkeError, Ke, Message, Payload, PayloadType, Proposal, Sa, Transform,
-    FLAG_RESPONSE, PROTO_ESP, TRANSFORM_DH, TRANSFORM_ENCR, TRANSFORM_INTEG, TRANSFORM_PRF,
+    FLAG_RESPONSE, PROTO_IKE, TRANSFORM_DH, TRANSFORM_ENCR, TRANSFORM_INTEG, TRANSFORM_PRF,
 };
 use crate::keys::{derive_keys, skeyseed, IkeKeySizes, IkeKeys};
 
@@ -107,13 +107,14 @@ impl SaInitInitiator {
         let sa = Sa {
             proposals: vec![Proposal {
                 number: 1,
-                protocol_id: PROTO_ESP,
+                protocol_id: PROTO_IKE,
                 spi: vec![],
                 transforms: vec![
                     Transform {
                         transform_type: TRANSFORM_ENCR,
                         id: 12, // ENCR_AES_CBC
-                        attributes: vec![],
+                        // RFC 7296 §3.3.2: AES-CBC must state its key length.
+                        attributes: vec![0x80, 0x0E, 0x00, 0x80],
                     },
                     Transform {
                         transform_type: TRANSFORM_PRF,
@@ -231,7 +232,7 @@ pub fn sa_init_response(
                 body: Sa {
                     proposals: vec![Proposal {
                         number: 1,
-                        protocol_id: PROTO_ESP,
+                        protocol_id: PROTO_IKE,
                         spi: vec![],
                         transforms: vec![
                             Transform {

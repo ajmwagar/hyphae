@@ -37,7 +37,7 @@ normative clause and the executable test that proves it.
 | Mobile-originated and mobile-terminated calls, CANCEL, PRACK, BYE (`INV-*`, `UAS-*`) | implemented |
 | Hold/resume, call waiting, re-INVITE/UPDATE renegotiation (`SUP-*`) | implemented |
 | Voice continuity: EPS fallback classification, media-liveness monitor (`VOICE-*`) | implemented |
-| Wi-Fi calling: EAP-AKA' keys, IKEv2 codec, EAP exchange, DH, key schedule, SK layer, IKE_SA_INIT, IKE_AUTH, child SA + configuration payload, S2b install, UDP end-to-end (`EPDG-001..013`) | protocol complete and runs end to end over UDP; PC/SC adapter for a real SIM pending |
+| Wi-Fi calling: EAP-AKA' keys, IKEv2 codec, EAP exchange, DH, key schedule, SK layer, IKE_SA_INIT, IKE_AUTH, child SA + configuration payload, S2b install, UDP end-to-end (`EPDG-001..013`) | protocol complete and runs end to end over UDP; PC/SC hardware SIM adapter available as optional `usim-pcsc` |
 | Forked INVITE, OPTIONS keepalive (`INV-004`, `KEEP-001`) | implemented |
 | SMS over IMS, both directions (`SMS-*`) | implemented |
 | Gm IPsec: authenticated ESP, SA negotiation, Linux XFRM (`SEC-002..004`) | implemented |
@@ -45,7 +45,7 @@ normative clause and the executable test that proves it.
 | Call-audio seam: ring buffer, loopback, WAV capture, pacing (`AUDIO-001`) | implemented; device adapter out of tree |
 | Payload formats: RFC 4867 AMR-WB, TS 26.445 EVS (`RTP-*`, `EVS-001`) | implemented |
 | Modem backends: AT/QMI, MBIM, CCCI boundary (`TRN-*`) | modelled / boundary |
-| USIM access: software, PC/SC boundary, QMI UIM Send APDU, AT+CSIM (`USIM-*`) | implemented |
+| USIM access: software, PC/SC hardware adapter, QMI UIM Send APDU, AT+CSIM (`USIM-*`) | implemented |
 | Emergency (E911) request construction (`E911-001`) | implemented, never transmitted |
 | Byte-level modem I/O, live emergency calling | out of tree / product gate |
 
@@ -79,6 +79,7 @@ byte I/O is the only modem-specific piece left.
 | `sip` | RFC 3261 messages, headers, client/server transactions; no I/O |
 | `aka` | Milenage f1–f5, AUTN verification, RFC 3310 RES, EAP-AKA' keys; pure functions |
 | `usim` | TS 31.102 `AUTHENTICATE`, card boundary, QMI UIM / AT+CSIM adapters, software USIM |
+| `usim-pcsc` | optional PC/SC hardware card channel (excluded from the default pure-Rust workspace) |
 | `epdg` | Wi-Fi calling: IKEv2 codec, EAP-AKA' exchange, DH, key schedule, SK layer, SA_INIT, IKE_AUTH, child SA, configuration payload |
 | `ims` | profile, REGISTER/401/407, SDP, dialogs, MO/MT calls, SMS, E911, continuity |
 | `carrier` | TOML profiles keyed by MCC/MNC, plus lab profile `00101` |

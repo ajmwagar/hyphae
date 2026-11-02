@@ -23,7 +23,15 @@ the whole key chain agreed, not that both sides used one fixture.
 cargo run -p epdg-lab            # both halves on loopback
 cargo run -p epdg-lab -- --listen 0.0.0.0:500
 cargo run -p epdg-lab -- --connect 10.0.0.1:500
+
+# Hardware SIM: the UE asks the PC/SC card for RES/CK/IK instead of holding K/OPc.
+cargo run -p epdg-lab --features pcsc -- --pcsc
+cargo run -p epdg-lab --features pcsc -- --pcsc "ACS ACR38U" --connect 10.0.0.1:500
 ```
+
+`--pcsc` requires a PC/SC reader (Linux: `libpcsclite-dev` + `pcscd`) and a
+test card programmed with the public TS 35.208 test set 1 for the stand-in
+responder. The default build stays pure Rust and does not link PC/SC.
 
 Expected:
 

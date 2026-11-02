@@ -53,8 +53,14 @@ vector.
 Default build: pure-Rust, small, no async runtime, no C.
 
 * `toml` (carrier profile parsing)
-* `md5` (RFC 2617 digest; MD5 is not used for authentication security on its
-  own — IMS-AKA supplies RES, and the digest is wrapped by the 3GPP AKA)
+* **RustCrypto primitives** — `aes`, `sha1`, `sha2`, `hmac`, `md-5`, `subtle`.
+  Cryptographic primitives are never implemented in this tree. Each is pinned
+  to a published vector in the tests: FIPS 197 for AES, RFC 4231 for
+  HMAC-SHA-256, RFC 2202 for HMAC-MD5/HMAC-SHA-1, RFC 3174 for SHA-1. The
+  protocol logic around them — Milenage, EAP-AKA', IKEv2, ESP framing — stays
+  in-tree, which is the point of the project.
+* `num-bigint` (MODP modular exponentiation for the ePDG Diffie-Hellman). Not
+  constant-time; see the note in `docs/architecture.md`.
 * `pkg-config` (build-time only, `codec-amr`)
 * optional `libloading` (`codec-amr` dlopen feature)
 * optional `opus` (`codec` feature; royalty-free)

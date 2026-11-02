@@ -17,6 +17,7 @@ use epdg::keys::IkeKeySizes;
 use epdg::sa::{SaError, SaInitInitiator};
 use epdg::sk::BLOCK_LEN;
 use epdg::ChildSa;
+use usim::{AkaOutput, Usim};
 
 use crate::responder::AT_RAND;
 
@@ -34,6 +35,10 @@ pub enum ClientError {
     Decode(String),
     /// The exchange finished without the parameters a client needs.
     Incomplete,
+    /// The USIM rejected the challenge or the channel failed.
+    Usim(usim::UsimError),
+    /// The USIM asked for SQN resynchronisation; a real UE sends AUTS.
+    SyncFailure([u8; 14]),
 }
 
 impl core::fmt::Display for ClientError {
@@ -45,6 +50,8 @@ impl core::fmt::Display for ClientError {
             ClientError::Unexpected(what) => write!(f, "unexpected message: {what}"),
             ClientError::Decode(what) => write!(f, "decode error: {what}"),
             ClientError::Incomplete => f.write_str("exchange finished without a child SA"),
+            ClientError::Usim(e) => write!(f, "USIM: {e}"),
+            ClientError::SyncFailure(_) => f.write_str("USIM requested SQN resynchronisation"),
         }
     }
 }
@@ -76,11 +83,18 @@ pub struct Established {
     pub child_keys: Vec<u8>,
 }
 
+/// Where the AKA vectors come from: in-process Milenage for the lab, or a
+/// real USIM/PC/SC card.
+enum Credential {
+    Milenage(Milenage),
+    Usim(Box<dyn Usim>),
+}
+
 /// A UE driving IKE_SA_INIT and IKE_AUTH (EAP-only, RFC 5998).
 pub struct UeClient {
     network: String,
     identity: String,
-    milenage: Milenage,
+    credential: Credential,
     sa: SaInitInitiator,
     auth: Option<IkeAuthInitiator>,
     peer: Option<AkaPrimePeer>,
@@ -107,7 +121,33 @@ impl UeClient {
         Ok(Self {
             network: network.into(),
             identity: identity.into(),
-            milenage: Milenage::new_with_opc(k, opc),
+            credential: Credential::Milenage(Milenage::new_with_opc(k, opc)),
+            sa: SaInitInitiator::new(initiator_spi, private_exponent, nonce_i, group)?,
+            auth: None,
+            peer: None,
+            child_spi,
+            iv: [0x33; BLOCK_LEN],
+            message_id: 1,
+        })
+    }
+
+    /// Build a client backed by a real USIM/card boundary instead of an
+    /// in-process Milenage. The card owns K/OP and the SQN window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_usim(
+        network: impl Into<String>,
+        identity: impl Into<String>,
+        usim: Box<dyn Usim>,
+        initiator_spi: [u8; 8],
+        private_exponent: &[u8],
+        nonce_i: Vec<u8>,
+        group: u16,
+        child_spi: [u8; 4],
+    ) -> Result<Self, ClientError> {
+        Ok(Self {
+            network: network.into(),
+            identity: identity.into(),
+            credential: Credential::Usim(usim),
             sa: SaInitInitiator::new(initiator_spi, private_exponent, nonce_i, group)?,
             auth: None,
             peer: None,
@@ -125,6 +165,18 @@ impl UeClient {
     /// Consume the IKE_SA_INIT response and build the first IKE_AUTH.
     pub fn on_sa_init_response(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
         let message = Message::decode(bytes).map_err(|e| ClientError::Decode(e.to_string()))?;
+        if std::env::var("EPDG_LAB_DEBUG").is_ok() {
+            let nonce = message
+                .find(PayloadType::Nonce)
+                .map(|p| p.body.clone())
+                .unwrap_or_default();
+            eprintln!(
+                "debug: sa_init response payloads={:?} nonce_r_len={} nonce_i_len={}",
+                message.payloads.iter().map(|p| p.kind).collect::<Vec<_>>(),
+                nonce.len(),
+                self.nonce_i().len()
+            );
+        }
         // `on_response` needs the Message, and the raw bytes for SignedOctets.
         let keys = self
             .sa
@@ -207,7 +259,7 @@ impl UeClient {
 
     /// If this message is the AKA' challenge, run Milenage and derive the EAP
     /// key set — what a USIM plus the ISIM would do in a real handset.
-    fn try_build_peer(&self, bytes: &[u8]) -> Result<Option<AkaPrimePeer>, ClientError> {
+    fn try_build_peer(&mut self, bytes: &[u8]) -> Result<Option<AkaPrimePeer>, ClientError> {
         let Some(auth) = self.auth.as_ref() else {
             return Ok(None);
         };
@@ -250,22 +302,30 @@ impl UeClient {
                 .ok_or(ClientError::Unexpected("AT_AUTN is not 16 octets"))?,
         );
 
-        // A real USIM checks AUTN before answering (TS 33.102 §6.3.3).
-        let check = verify_autn(&self.milenage, &rand, &autn);
-        if !check.mac_valid {
-            return Err(ClientError::AutnRejected);
-        }
         let amf = [autn[6], autn[7]];
-        let outputs = self.milenage.compute(&rand, &check.sqn, &amf);
-        let (ck, ik) = ck_ik_prime(&outputs.ck, &outputs.ik, &self.network)
+        let (res, ck, ik) = match &mut self.credential {
+            Credential::Milenage(milenage) => {
+                // A software USIM checks AUTN before answering (TS 33.102 §6.3.3).
+                let check = verify_autn(milenage, &rand, &autn);
+                if !check.mac_valid {
+                    return Err(ClientError::AutnRejected);
+                }
+                let outputs = milenage.compute(&rand, &check.sqn, &amf);
+                (outputs.res.to_vec(), outputs.ck, outputs.ik)
+            }
+            Credential::Usim(usim) => match usim.authenticate(&rand, &autn) {
+                Ok(AkaOutput::Success { res, ck, ik }) => (res, ck, ik),
+                Ok(AkaOutput::SyncFailure { auts }) => {
+                    return Err(ClientError::SyncFailure(auts));
+                }
+                Err(e) => return Err(ClientError::Usim(e)),
+            },
+        };
+        let (ck, ik) = ck_ik_prime(&ck, &ik, &self.network)
             .map_err(|_| ClientError::Unexpected("CK'/IK' derivation failed"))?;
         let keys = eap_keys(&ck, &ik, &self.network, &self.identity, &amf)
             .map_err(|_| ClientError::Unexpected("EAP key derivation failed"))?;
 
-        Ok(Some(AkaPrimePeer::new(
-            self.network.clone(),
-            keys,
-            outputs.res.to_vec(),
-        )))
+        Ok(Some(AkaPrimePeer::new(self.network.clone(), keys, res)))
     }
 }

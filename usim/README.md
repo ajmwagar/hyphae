@@ -24,25 +24,21 @@ CLA INS P1 P2 Lc
 
 Both parsers bound-check every length field.
 
-## No FFI
+## Hardware PC/SC
 
-This crate never opens a reader. A real PC/SC (`libpcsclite`) adapter lives
-outside the tree and implements `ApduChannel`:
+This crate never opens a reader, so it remains `#![forbid(unsafe_code)]` and has
+no C dependency. The hardware adapter is the separate, optional
+[`usim-pcsc`](../usim-pcsc/) package. It implements `ApduChannel` with
+`SCardListReaders`/`SCardConnect`/`SCardTransmit` and splits `data || SW1 || SW2`.
 
-```rust
-use usim::{ApduChannel, CardResponse, UsimCard, UsimError};
-
-struct Pcsc { /* ... */ }
-
-impl ApduChannel for Pcsc {
-    fn transmit(&mut self, _command: &[u8]) -> Result<CardResponse, UsimError> {
-        // SCardTransmit(...) and split the trailing status word.
-        unimplemented!("out-of-tree adapter")
-    }
-}
+```sh
+cargo run --manifest-path usim-pcsc/Cargo.toml -- list
+cargo run --manifest-path usim-pcsc/Cargo.toml -- atr
+cargo run -p epdg-lab --features pcsc -- --pcsc
 ```
 
-The crate is `#![forbid(unsafe_code)]` and has no C dependency.
+For a real SIM, the same `UsimCard` wraps either `PcscChannel`, `QmiApdu`, or
+`AtApdu`; the AKA codec never changes.
 
 ## Lab / tests
 
