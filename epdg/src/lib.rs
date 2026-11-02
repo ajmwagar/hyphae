@@ -45,8 +45,10 @@ pub use auth::{
 pub use child::{ChildDirection, ChildEncryption, ChildError, ChildIntegrity, ChildSa};
 pub use cp::{ConfigAttribute, ConfigPayload};
 pub use discovery::{
-    epdg_fqdn, epdg_fqdn_5gs_tai, epdg_fqdn_lac, epdg_fqdn_tai, visited_country_fqdn,
-    DiscoveryError, PlmnId,
+    emergency_epdg_fqdn, emergency_epdg_fqdn_5gs_tai, emergency_epdg_fqdn_lac,
+    emergency_epdg_fqdn_tai, emergency_numbers_fqdn, emergency_visited_country_fqdn, epdg_fqdn,
+    epdg_fqdn_5gs_tai, epdg_fqdn_lac, epdg_fqdn_tai, visited_country_fqdn, DiscoveryError, PlmnId,
+    SOS_LABEL,
 };
 pub use eap::{AkaPrimePeer, EapPacket, EapPeerError};
 pub use ike_auth::{AuthError, AuthStep, IkeAuthInitiator};
