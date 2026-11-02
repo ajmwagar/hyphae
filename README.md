@@ -8,10 +8,11 @@ SDP, carrier profiles and a codec-agnostic media boundary.
 Status: **spec matrix green**. The control-plane state machine, Milenage/AKA,
 SDP offer/answer with RFC 3312 preconditions, RFC 4867 and TS 26.445 (EVS)
 payload formats, SMS over IMS, the caller-side call path, carrier loader, RTP/RTCP media framing (RFC 3550
-plus a jitter buffer and PLC) and both mock and modem-modeled transports compile
-and have spec-derived tests. The standalone CLI works in mock/lab mode. Real
-IPsec SA/crypto, the byte-level AT/QMI I/O and the vendor CCCI channel are the
-remaining stubbed or product-gated rows (see [`docs/specs.md`](docs/specs.md)).
+plus a jitter buffer and PLC), and the mock plus the modem-modeled AT/QMI, MBIM
+and CCCI-boundary transports compile and have spec-derived tests. The standalone
+CLI works in mock/lab mode. Real IPsec SA/crypto, the byte-level AT/QMI I/O and
+the out-of-tree CCCI `/dev/ccci_*` adapter are the remaining stubbed or
+product-gated rows (see [`docs/specs.md`](docs/specs.md)).
 
 ## Why it matters
 
@@ -50,7 +51,7 @@ codec/      Codec trait + optional Opus (feature `opus`); PCM only
 codec-amr/  RFC 4867 payload format + optional AMR-WB FFI (separate package)
 evs/        TS 26.445 appendix A EVS RTP payload format (Header-Full); no codec
 media/      RTP/RTCP framing (RFC 3550), jitter buffer and PLC around codec-amr
-transport/  Transport trait + in-memory MockTransport
+transport/  Transport trait: mock, UDP/TCP, ESP, AT/QMI + MBIM PDN, CCCI boundary
 tests/      conformance harness + golden fixtures with spec citations
 lab/        docker-compose plan for Open5GS + Kamailio IMS + USIM
 docs/       specs matrix, architecture, ARM targets, references, facts
@@ -133,7 +134,8 @@ between the programmable USIM and the HSS. Use test credentials only.
 - [`docs/specs.md`](docs/specs.md) — requirement → clause → test → crate matrix
   (with TODO phases marked honestly).
 - [`docs/architecture.md`](docs/architecture.md) — codec-service boundary,
-  retrofit vs manufacture, transport backends (AT/QMI now, MTK CCCI later).
+  retrofit vs manufacture, transport backends (AT/QMI and MBIM modelled; MTK
+  CCCI boundary only).
 - [`docs/targets.md`](docs/targets.md) — ARM gate and its limits.
 - [`docs/references.md`](docs/references.md) — legal provenance and open-source
   reference terms.

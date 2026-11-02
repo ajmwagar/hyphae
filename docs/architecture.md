@@ -12,7 +12,7 @@
 |     v                v                          v                        |
 |   sip          codec (trait, Opus only)     transport (trait, mock)      |
 |   RFC 3261     PCM frames in/out             UDP/TCP later; AT/QMI now;  |
-|   no I/O                                     MTK CCCI later             |
+|   no I/O                                     MBIM / CCCI boundary       |
 |                                                                          |
 |   aka          RFC 3310 / Milenage, pure functions over USIM output       |
 |   carrier      TOML profiles keyed by MCC/MNC (data only)                 |
@@ -90,7 +90,8 @@ patent-noticed packages or device-local retrofit services. See
 | UDP/TCP/TLS | TODO | `std::net` adapter; TLS is a later dependency decision |
 | AT command channel | TODO (phase 3) | adapter that writes SIP over the modem's IMS PDN or AT tunnel; does not change `ims` |
 | QMI | TODO (phase 3) | IMS PDN + P-CSCF/PCO discovery; adapter supplies `ImsProfile` |
-| MTK CCCI | TODO (phase 5) | vendor channel shim; protocol bytes stay spec-derived, no vendor code copied |
+| MBIM | modelled | control-frame wire shape + IMS PDN session; local addr is modem-assigned |
+| MTK CCCI | boundary only | `VendorChannel` trait + this tree's own length framing; no vendor code copied |
 
 Transport adapters own platform failure, retries and MTU behaviour. They must
 not parse or rewrite SIP semantics; they move `sip::Message` bytes.
