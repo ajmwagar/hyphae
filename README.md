@@ -11,10 +11,12 @@ payload formats, SMS over IMS, the caller-side call path, carrier loader, RTP/RT
 plus a jitter buffer and PLC), and the mock plus the modem-modeled AT/QMI, MBIM
 and CCCI-boundary transports compile and have spec-derived tests. Emergency
 (E911) request construction per TS 24.229 §5.1.6 is modelled purely as messages.
-The standalone CLI works in mock/lab mode. Real IPsec SA/crypto, the byte-level
-AT/QMI I/O, the out-of-tree CCCI `/dev/ccci_*` adapter and *live* emergency
-calling (a regulated product gate) are the remaining stubbed or product-gated
-rows (see [`docs/specs.md`](docs/specs.md)).
+The standalone CLI works in mock/lab mode. Gm IPsec is implemented as a real
+ESP codec (HMAC-MD5-96 / HMAC-SHA-1-96, null encryption, anti-replay) plus SA
+negotiation and Linux XFRM programming; the byte-level AT/QMI I/O, the
+out-of-tree CCCI `/dev/ccci_*` adapter and *live* emergency calling (a regulated
+product gate) are the remaining stubbed or product-gated rows (see
+[`docs/specs.md`](docs/specs.md)).
 
 ## Why it matters
 

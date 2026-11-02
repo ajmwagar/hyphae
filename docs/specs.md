@@ -32,7 +32,9 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | PR-001 | Carrier profile loads APN, P-CSCF discovery, codec policy, timers | GSMA IR.92 §4.1; 3GPP TS 23.003 §9.1, §13.2 | `carrier_001_lab_profile_loads`, `loads_embedded_lab_profile` | carrier |
 | PR-002 | Carrier profile's `amr_wb_modes` feeds the SDP offer | GSMA IR.92 §4.3; 3GPP TS 26.114 §5.2.1 | `carrier_002_amr_wb_modes_feed_sdp_offer` | carrier, ims |
 | SEC-001 | Security-Server response is echoed as Security-Verify | RFC 3329 §2.3, §3.2 | `sec_001_security_server_echoed_as_security_verify` | ims |
-| SEC-002 | Actual IPsec SA setup and ESP encapsulation | 3GPP TS 33.203 §7; RFC 4303 | `round_trips_inner_packet`, `sequence_advances_per_packet` | transport |
+| SEC-002 | ESP encapsulation with real integrity: HMAC-MD5-96/HMAC-SHA-1-96 ICV, null encryption, 64-packet anti-replay window, sequence numbering | 3GPP TS 33.203 §7; RFC 4303; RFC 2403; RFC 2404 | `round_trips_inner_packet`, `sequence_advances_per_packet`, `icv_is_enforced`, `replay_is_rejected` | transport |
+| SEC-003 | SA negotiation from `Security-Client`/`Security-Server` and programming the kernel SAs; Linux XFRM command generation | 3GPP TS 33.203 §7; RFC 3329; RFC 4303 | `sec_003_esp_authenticates_frames_and_rejects_replay` | transport, conformance |
+| SEC-004 | IPsec agreement from the AKA CK/IK and `ip xfrm state/policy` rendering (Linux apply, other platforms report unsupported) | 3GPP TS 33.203 §7; RFC 3329 | `sec_004_negotiates_sas_and_renders_xfrm_commands` | transport, conformance |
 | REG-009 | Registration refresh before expiry and re-REGISTER on network change | RFC 3261 §10.2.4; 3GPP TS 24.229 §5.1.1.3 | `reg_009_refresh_before_expiry_and_re_register_on_network_change` | ims |
 | REG-010 | Network-initiated deregistration (NOTIFY `deactivated`) | RFC 3265; 3GPP TS 24.229 §5.1.1.4 | `reg_010_network_initiated_deregistration` | ims |
 | REG-011 | Multiple contacts for one IMPU are all carried in a single REGISTER | RFC 3261 §10.2 | `reg_011_multiple_contacts_third_party_and_pcscf_failover` | ims, conformance |
@@ -68,11 +70,17 @@ module. "TODO" rows are deliberately not claimed as implemented.
   modem, USIM, or codec C dependency is required for the default gate.
 * Rows marked TODO are not counted as implemented and must not be cited as
   conformance evidence until a named test exists.
-* **Modeled backends.** `SEC-002` (ESP encapsulation, `transport::esp`) and
-  `TRN-001` (modem IMS PDN, `transport::modem`) cover the *contract* and wire
-  shape — RFC 4303 frame round-trip and modem-assigned PDN addressing — but the
-  IKEv2 SA/key derivation and the AT/QMI byte-level I/O remain documented stubs
-  pending a kernel SA and a modem device. `TRN-003` (MBIM, `transport::mbim`)
+* **IPsec (Gm).** IMS does **not** use IKE: the Gm SAs are keyed directly from
+  the AKA `CK`/`IK` and negotiated by the `Security-Client` /
+  `Security-Server` headers (TS 33.203 §7, RFC 3329). `transport::esp` is a real
+  ESP codec (HMAC-MD5-96 / HMAC-SHA-1-96, null encryption, anti-replay), and
+  `transport::ipsec` negotiates the SA pair and renders `ip xfrm state|policy`
+  commands; the data path on Linux is the kernel's XFRM. IKEv2/EAP-AKA′ belongs
+  to the separate ePDG/Wi-Fi-calling path and is out of scope here.
+* **Modeled backends.** `TRN-001` (modem IMS PDN, `transport::modem`) covers the
+  *contract* — modem-assigned PDN addressing — while the AT/QMI byte-level I/O
+  remains a documented stub pending a modem device. `TRN-003` (MBIM,
+  `transport::mbim`)
   models the control-frame wire shape and the modem-assigned IMS PDN session;
   `TRN-002` (CCCI, `transport::ccci`) ships only the vendor *boundary* — a
   `VendorChannel` trait plus this tree's own length framing — because CCCI is a

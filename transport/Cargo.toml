@@ -8,3 +8,4 @@ rust-version.workspace = true
 
 [dependencies]
 sip.workspace = true
+md5 = "0.7"
