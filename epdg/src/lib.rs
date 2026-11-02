@@ -26,7 +26,11 @@ pub mod dh;
 pub mod eap;
 pub mod ikev2;
 pub mod keys;
+pub mod sa;
+pub mod sk;
 
 pub use eap::{AkaPrimePeer, EapPacket, EapPeerError};
 pub use ikev2::{ExchangeType, Header, IkeError, Message, Payload, PayloadType};
 pub use keys::{derive_keys, prf_plus, skeyseed, IkeKeySizes, IkeKeys};
+pub use sa::{sa_init_response, SaError, SaInitInitiator};
+pub use sk::{Sk, SkError};

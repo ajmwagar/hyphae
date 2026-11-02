@@ -2143,3 +2143,82 @@ fn epdg_005_ikev2_key_schedule_splits_the_prf_stream() {
     assert_eq!(keys.sk_pi, material[128..160]);
     assert_eq!(keys.sk_pr, material[160..192]);
 }
+
+// --- EPDG-006: SK (encrypted payload) layer -------------------------------
+
+#[test]
+fn epdg_006_sk_seals_and_opens_with_aes_cbc_and_hmac() {
+    use epdg::ikev2::{ExchangeType, Header, Payload, PayloadType, FLAG_INITIATOR};
+    use epdg::sk::Sk;
+
+    let sk = Sk::aes_cbc_128_sha256_128(&[0x11; 16], &[0x22; 32]).unwrap();
+    let header = Header {
+        initiator_spi: [0x01; 8],
+        responder_spi: [0x02; 8],
+        next_payload: PayloadType::None,
+        exchange: ExchangeType::IkeAuth,
+        flags: FLAG_INITIATOR,
+        message_id: 3,
+    };
+    let payloads = vec![
+        Payload {
+            kind: PayloadType::Idi,
+            critical: false,
+            body: vec![2, 0, 0, 0, b'u', b's', b'e', b'r'],
+        },
+        Payload {
+            kind: PayloadType::Nonce,
+            critical: false,
+            body: vec![0xAA; 24],
+        },
+    ];
+
+    let sealed = sk.seal(header, &payloads, &[0x33; 16]);
+    // The outer next payload is ENCRYPTED and the plaintext is not on the wire.
+    assert_eq!(sealed[16], PayloadType::Encrypted as u8);
+    assert!(!sealed.windows(4).any(|w| w == b"user"));
+    let total = u32::from_be_bytes([sealed[24], sealed[25], sealed[26], sealed[27]]) as usize;
+    assert_eq!(total, sealed.len());
+
+    let opened = sk.open(&sealed).unwrap();
+    assert_eq!(opened.payloads, payloads);
+    assert_eq!(opened.header.message_id, 3);
+
+    // Any bit flip is rejected by the ICV.
+    let mut tampered = sealed.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0x01;
+    assert!(sk.open(&tampered).is_err());
+}
+
+// --- EPDG-007: IKE_SA_INIT handshake --------------------------------------
+
+#[test]
+fn epdg_007_ike_sa_init_derives_matching_keys() {
+    use epdg::dh::DhKeyPair;
+    use epdg::ikev2::{Ke, Message, PayloadType};
+    use epdg::keys::{derive_keys, skeyseed, IkeKeySizes};
+    use epdg::sa::{sa_init_response, SaInitInitiator};
+
+    let mut initiator = SaInitInitiator::new([0x11; 8], &[0x22; 32], vec![0x33; 32], 14).unwrap();
+    let request = initiator.first_message();
+    assert_eq!(request.header.next_payload, PayloadType::Sa);
+    assert_eq!(
+        Message::decode(&request.encode()).unwrap(),
+        request,
+        "the first message survives its own codec"
+    );
+
+    let response = sa_init_response(&request, [0x44; 8], &[0x55; 32], vec![0x66; 32], 14).unwrap();
+    let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
+    let initiator_keys = initiator.on_response(&response, sizes).unwrap();
+    assert_eq!(initiator.responder_spi(), Some([0x44; 8]));
+
+    // The responder computes the same schedule from its own exponent.
+    let responder = DhKeyPair::from_private(14, &[0x55; 32]).unwrap();
+    let ke = Ke::decode(&request.find(PayloadType::Ke).unwrap().body).unwrap();
+    let shared = responder.agree(&ke.key_data).unwrap();
+    let seed = skeyseed(&[0x33; 32], &[0x66; 32], &shared);
+    let responder_keys = derive_keys(&seed, &[0x33; 32], &[0x66; 32], sizes);
+    assert_eq!(initiator_keys, responder_keys);
+}

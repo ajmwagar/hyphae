@@ -11,7 +11,7 @@
 mod aes;
 pub mod eap_aka_prime;
 
-pub use aes::encrypt_block;
+pub use aes::{decrypt_block, encrypt_block};
 
 /// 128-bit subscriber key K.
 pub type Key = [u8; 16];

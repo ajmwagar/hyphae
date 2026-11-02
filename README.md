@@ -37,7 +37,7 @@ normative clause and the executable test that proves it.
 | Mobile-originated and mobile-terminated calls, CANCEL, PRACK, BYE (`INV-*`, `UAS-*`) | implemented |
 | Hold/resume, call waiting, re-INVITE/UPDATE renegotiation (`SUP-*`) | implemented |
 | Voice continuity: EPS fallback classification, media-liveness monitor (`VOICE-*`) | implemented |
-| Wi-Fi calling core: EAP-AKA' keys, IKEv2 codec, EAP exchange, DH, key schedule (`EPDG-001..005`) | implemented; SK crypto and S2b pending |
+| Wi-Fi calling: EAP-AKA' keys, IKEv2 codec, EAP exchange, DH, key schedule, SK layer, IKE_SA_INIT (`EPDG-001..007`) | implemented; IKE_AUTH state machine and S2b pending |
 | Forked INVITE, OPTIONS keepalive (`INV-004`, `KEEP-001`) | implemented |
 | SMS over IMS, both directions (`SMS-*`) | implemented |
 | Gm IPsec: authenticated ESP, SA negotiation, Linux XFRM (`SEC-002..004`) | implemented |
@@ -79,7 +79,7 @@ byte I/O is the only modem-specific piece left.
 | `sip` | RFC 3261 messages, headers, client/server transactions; no I/O |
 | `aka` | Milenage f1–f5, AUTN verification, RFC 3310 RES, EAP-AKA' keys; pure functions |
 | `usim` | TS 31.102 `AUTHENTICATE`, card boundary, QMI UIM / AT+CSIM adapters, software USIM |
-| `epdg` | Wi-Fi calling: IKEv2 codec, EAP-AKA' exchange, DH and key schedule |
+| `epdg` | Wi-Fi calling: IKEv2 codec, EAP-AKA' exchange, DH, key schedule, SK layer, SA_INIT |
 | `ims` | profile, REGISTER/401/407, SDP, dialogs, MO/MT calls, SMS, E911, continuity |
 | `carrier` | TOML profiles keyed by MCC/MNC, plus lab profile `00101` |
 | `codec` | `Codec` trait and optional Opus (feature `opus`); PCM only |
