@@ -716,7 +716,7 @@ fn run_real(opts: &Options, deregister: bool) -> Result<(), String> {
     let timeout = Duration::from_millis(10_000);
 
     eprintln!(
-        "hyphae: LAB ONLY: AKA RES/OPc credentials are being supplied by flag/env; a USIM adapter is not implemented yet"
+        "hyphae: LAB ONLY: AKA RES/OPc credentials are being supplied by flag/env; the challenge is run through the software USIM (usim crate)"
     );
     if opts.res_hex.is_none() {
         if opts.k_hex.is_some() && opts.opc_hex.is_some() {

@@ -113,6 +113,7 @@ dependencies = [
  "md5",
  "sip",
  "transport",
+ "usim",
 ]
 
 [[package]]
