@@ -3364,3 +3364,67 @@ fn e911_008_a_civic_address_is_conveyed_as_a_pidf_lo() {
     assert!(!xml.contains("<script>"));
     assert!(xml.contains("entity=\"sip:a&amp;b@example.net\""));
 }
+
+// --- MEDIA-002: the audio session ---------------------------------------
+
+#[test]
+fn media_002_a_session_captures_sends_receives_and_plays() {
+    use media::audio::{AudioSink, SilentSource};
+    use media::packet::RtpPacket;
+    use media::session::{MediaSession, SessionConfig};
+    use std::time::{Duration, Instant};
+
+    /// A sink that remembers what was played.
+    #[derive(Default)]
+    struct Recorder(Vec<i16>);
+
+    impl AudioSink for Recorder {
+        fn write(&mut self, samples: &[i16]) -> Result<(), media::audio::AudioError> {
+            self.0.extend_from_slice(samples);
+            Ok(())
+        }
+    }
+
+    let start = Instant::now();
+    let codec = codec::PcmCodec::new();
+    let config = SessionConfig::for_codec(&codec, 0xCAFE, 96);
+    let mut session = MediaSession::new(
+        config,
+        Box::new(codec),
+        Box::new(Recorder::default()),
+        Box::new(SilentSource),
+        start,
+    );
+
+    // 20 ms of wall clock is one frame: it is encoded and offered for sending,
+    // with the sequence and timestamp the far end expects.
+    let tick = session.tick(start + Duration::from_millis(20)).unwrap();
+    assert_eq!(tick.send.len(), 1);
+    assert_eq!(tick.send[0].sequence, 1);
+    assert_eq!(tick.send[0].timestamp, 0);
+    assert_eq!(tick.send[0].ssrc, 0xCAFE);
+    assert_eq!(tick.send[0].payload_type, 96);
+
+    // Inbound audio reaches the jitter buffer and is then played.
+    for seq in 1..=4u16 {
+        let mut packet = RtpPacket::new(96, seq, u32::from(seq - 1) * 960, 0xBEEF);
+        packet.payload = vec![0x22; 1920];
+        assert!(session.on_rtp(&packet.encode().unwrap()));
+    }
+    let tick = session.tick(start + Duration::from_millis(40)).unwrap();
+    assert_eq!(tick.played, 1);
+
+    // A gap is concealed and reported, not played as a discontinuity.
+    let mut packet = RtpPacket::new(96, 9, 8 * 960, 0xBEEF);
+    packet.payload = vec![0x22; 1920];
+    assert!(session.on_rtp(&packet.encode().unwrap()));
+    let mut concealed = 0;
+    for step in 3..=9 {
+        concealed += session
+            .tick(start + Duration::from_millis(20 * step))
+            .unwrap()
+            .concealed;
+    }
+    assert!(concealed > 0);
+    assert!(!session.take_losses().is_empty());
+}

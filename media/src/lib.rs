@@ -32,6 +32,7 @@ pub mod jitter;
 pub mod packet;
 pub mod plc;
 pub mod rtcp;
+pub mod session;
 
 use std::fmt;
 
