@@ -61,34 +61,52 @@ const PRIMARY_SID_BYTES: usize = 6;
 /// bit set to 1 (see [`FrameKind::IoSid`]).
 const IO_SID_BYTES: usize = 7;
 
-/// The three defined single-mode sets plus the IO variants, as the `T` field of
-/// the CMR byte (3 bits). `T=6` (IO NB+WB) and `T=7` are reserved.
+/// The EVS mode set selected by the 3-bit `T` field of the CMR byte.
+///
+/// TS 26.445 Table A.3 defines every `T` value as follows:
+///
+/// | `T` | meaning |
+/// |-----|---------|
+/// | 000 | EVS Primary narrowband |
+/// | 001 | EVS AMR-WB IO |
+/// | 010 | EVS Primary wideband |
+/// | 011 | EVS Primary super-wideband |
+/// | 100 | EVS Primary fullband |
+/// | 101 | wideband 13.2 kbit/s channel-aware |
+/// | 110 | super-wideband 13.2 kbit/s channel-aware |
+/// | 111 | no request (`D=1111`) / reserved |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeSet {
-    /// `T=0`: AMR-Narrowband.
+    /// `T=000`: EVS Primary narrowband.
     Nb = 0,
-    /// `T=1`: AMR-Wideband.
-    Wb = 1,
-    /// `T=2`: EVS fullband.
-    Fb = 2,
-    /// `T=3`: IO narrowband.
-    IoNb = 3,
-    /// `T=4`: IO wideband.
-    IoWb = 4,
-    /// `T=5`: IO fullband.
-    IoFb = 5,
+    /// `T=001`: EVS AMR-WB IO.
+    Io = 1,
+    /// `T=010`: EVS Primary wideband.
+    Wb = 2,
+    /// `T=011`: EVS Primary super-wideband.
+    Swb = 3,
+    /// `T=100`: EVS Primary fullband.
+    Fb = 4,
+    /// `T=101`: wideband 13.2 kbit/s channel-aware.
+    WbChannelAware = 5,
+    /// `T=110`: super-wideband 13.2 kbit/s channel-aware.
+    SwbChannelAware = 6,
+    /// `T=111`: the no-request / reserved code space.
+    NoRequestSpace = 7,
 }
 
 impl ModeSet {
-    /// Decode a 3-bit `T` field. `6` (IO NB+WB) and `7` are reserved.
+    /// Decode a 3-bit `T` field.
     pub fn from_t(t: u8) -> Option<Self> {
         match t {
             0 => Some(ModeSet::Nb),
-            1 => Some(ModeSet::Wb),
-            2 => Some(ModeSet::Fb),
-            3 => Some(ModeSet::IoNb),
-            4 => Some(ModeSet::IoWb),
-            5 => Some(ModeSet::IoFb),
+            1 => Some(ModeSet::Io),
+            2 => Some(ModeSet::Wb),
+            3 => Some(ModeSet::Swb),
+            4 => Some(ModeSet::Fb),
+            5 => Some(ModeSet::WbChannelAware),
+            6 => Some(ModeSet::SwbChannelAware),
+            7 => Some(ModeSet::NoRequestSpace),
             _ => None,
         }
     }
@@ -99,15 +117,58 @@ impl ModeSet {
     }
 }
 
+/// A decode of one CMR byte into the mode / bit-rate it requests.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ModeRequest {
+    /// An EVS Primary bit-rate request in kbit/s for the given bandwidth.
+    Primary { bandwidth: Bandwidth, kbps: f32 },
+    /// An EVS AMR-WB IO codec-mode request in kbit/s.
+    Io { kbps: f32 },
+    /// A 13.2 kbit/s channel-aware (partial-redundancy) request.
+    ChannelAware {
+        bandwidth: Bandwidth,
+        /// `true` = high level (`CA-H`), `false` = low level (`CA-L`).
+        high: bool,
+        /// Partial-redundancy offset: 2, 3, 5 or 7 frames.
+        offset: u8,
+    },
+    /// The explicit `NO_REQ` code point (`T=111`, `D=1111`).
+    NoRequest,
+}
+
+impl ModeRequest {
+    /// The requested source bit-rate in kbit/s, if one is implied.
+    pub fn kbps(self) -> Option<f32> {
+        match self {
+            ModeRequest::Primary { kbps, .. } | ModeRequest::Io { kbps } => Some(kbps),
+            ModeRequest::ChannelAware { .. } => Some(13.2),
+            ModeRequest::NoRequest => None,
+        }
+    }
+}
+
+/// An EVS audio bandwidth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bandwidth {
+    /// Narrowband (8 kHz audio).
+    Narrowband,
+    /// Wideband (16 kHz audio).
+    Wideband,
+    /// Super-wideband (32 kHz audio).
+    SuperWideband,
+    /// Fullband (48 kHz audio).
+    Fullband,
+}
+
 /// A Codec Mode Request (CMR) byte from the EVS Header-Full payload.
 ///
 /// Layout: `H(1)=1`, `T(3)`, `D(4)`. The `D` field's meaning depends on `T`;
-/// `D=15` is always *no request* regardless of `T`.
+/// see [`Cmr::request`] for the Table A.3 decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cmr {
     /// Mode set selected by the `T` field.
     pub mode_set: ModeSet,
-    /// Rate index within the mode set, or 15 for no request.
+    /// Rate index within the mode set (`D`, 0..=15).
     pub d: u8,
 }
 
@@ -120,8 +181,16 @@ impl Cmr {
         }
     }
 
+    /// The `NO_REQ` byte (`T=111`, `D=1111`), meaning "no codec mode request".
+    pub fn no_request() -> Self {
+        Self {
+            mode_set: ModeSet::NoRequestSpace,
+            d: 15,
+        }
+    }
+
     /// Parse a CMR byte (`H=1`, `T`, `D`). Returns `None` if the high bit is not
-    /// set (this is not a CMR) or the `T` field is reserved.
+    /// set (this is not a CMR byte).
     pub fn parse(byte: u8) -> Option<Self> {
         if byte & 0x80 == 0 {
             return None;
@@ -136,38 +205,109 @@ impl Cmr {
         0x80 | ((self.mode_set.t() & 0x07) << 4) | (self.d & 0x0f)
     }
 
-    /// Whether this CMR is the "no request" sentinel (`D=15`).
+    /// Whether this byte is the explicit `NO_REQ` code point.
     pub fn is_no_request(self) -> bool {
-        self.d == 15
+        self.mode_set == ModeSet::NoRequestSpace && self.d == 15
     }
 
-    /// The downlink bit-rate in kbit/s for this CMR, or `None` for no request
-    /// or a reserved combination. This is the TS 26.445 Table A.3 rate for the
-    /// `T`/`D` pair.
-    pub fn bitrate_kbps(self) -> Option<f32> {
-        let d = self.d;
-        let table: &[f32] = match self.mode_set {
-            ModeSet::Nb | ModeSet::IoNb => {
-                if d > 7 {
-                    return None;
-                }
-                &[4.75, 5.15, 5.9, 6.7, 7.4, 7.95, 10.2, 12.2]
+    /// Decode the requested mode / bit-rate per TS 26.445 Table A.3, or `None`
+    /// for a reserved / not-defined `T`/`D` pair.
+    pub fn request(self) -> Option<ModeRequest> {
+        let d = self.d as usize;
+        match self.mode_set {
+            ModeSet::Nb => {
+                const R: [f32; 7] = [5.9, 7.2, 8.0, 9.6, 13.2, 16.4, 24.4];
+                R.get(d).map(|&kbps| ModeRequest::Primary {
+                    bandwidth: Bandwidth::Narrowband,
+                    kbps,
+                })
             }
-            ModeSet::Wb | ModeSet::IoWb => {
-                if d > 7 {
-                    return None;
-                }
-                &[6.6, 8.85, 12.65, 14.25, 15.85, 18.25, 23.05, 24.55]
+            ModeSet::Wb => {
+                const R: [f32; 12] = [
+                    5.9, 7.2, 8.0, 9.6, 13.2, 16.4, 24.4, 32.0, 48.0, 64.0, 96.0, 128.0,
+                ];
+                R.get(d).map(|&kbps| ModeRequest::Primary {
+                    bandwidth: Bandwidth::Wideband,
+                    kbps,
+                })
             }
-            ModeSet::Fb | ModeSet::IoFb => {
-                if d > 3 {
-                    return None;
-                }
-                &[24.0, 32.0, 48.0, 64.0]
+            ModeSet::Swb => {
+                // D=0011..=1011 map to 9.6..=128 kbit/s.
+                const R: [(usize, f32); 9] = [
+                    (3, 9.6),
+                    (4, 13.2),
+                    (5, 16.4),
+                    (6, 24.4),
+                    (7, 32.0),
+                    (8, 48.0),
+                    (9, 64.0),
+                    (10, 96.0),
+                    (11, 128.0),
+                ];
+                R.iter()
+                    .find(|(idx, _)| *idx == d)
+                    .map(|&(_, kbps)| ModeRequest::Primary {
+                        bandwidth: Bandwidth::SuperWideband,
+                        kbps,
+                    })
             }
-        };
-        table.get(d as usize).copied()
+            ModeSet::Fb => {
+                const R: [(usize, f32); 7] = [
+                    (5, 16.4),
+                    (6, 24.4),
+                    (7, 32.0),
+                    (8, 48.0),
+                    (9, 64.0),
+                    (10, 96.0),
+                    (11, 128.0),
+                ];
+                R.iter()
+                    .find(|(idx, _)| *idx == d)
+                    .map(|&(_, kbps)| ModeRequest::Primary {
+                        bandwidth: Bandwidth::Fullband,
+                        kbps,
+                    })
+            }
+            ModeSet::Io => {
+                const R: [f32; 9] = [6.6, 8.85, 12.65, 14.25, 15.85, 18.25, 19.85, 23.05, 23.85];
+                R.get(d).map(|&kbps| ModeRequest::Io { kbps })
+            }
+            ModeSet::WbChannelAware => channel_aware(d, Bandwidth::Wideband),
+            ModeSet::SwbChannelAware => channel_aware(d, Bandwidth::SuperWideband),
+            ModeSet::NoRequestSpace => {
+                // Only D=1111 is defined (NO_REQ); 0000..=1110 are reserved.
+                if self.d == 15 {
+                    Some(ModeRequest::NoRequest)
+                } else {
+                    None
+                }
+            }
+        }
     }
+
+    /// The requested source bit-rate in kbit/s, or `None` for no-request or a
+    /// reserved code point.
+    pub fn bitrate_kbps(self) -> Option<f32> {
+        self.request().and_then(ModeRequest::kbps)
+    }
+}
+
+/// Decode the `D` nibble of a channel-aware CMR (`T=101` or `T=110`).
+///
+/// `D=0bLLLO` where `LLL` is the level/offset index and `O` the last bit:
+/// values 0..=3 are `CA-L-O2/O3/O5/O7`, 4..=7 are `CA-H-O2/O3/O5/O7`.
+fn channel_aware(d: usize, bandwidth: Bandwidth) -> Option<ModeRequest> {
+    const OFFSETS: [u8; 4] = [2, 3, 5, 7];
+    if d > 7 {
+        return None;
+    }
+    let high = d >= 4;
+    let offset = OFFSETS[d & 0x03];
+    Some(ModeRequest::ChannelAware {
+        bandwidth,
+        high,
+        offset,
+    })
 }
 
 /// The kind of an EVS frame, derived from its frame type (`FT`).
@@ -227,9 +367,9 @@ pub fn frame_size(ft: u8) -> Option<usize> {
 const PRIMARY_KBPS: [f32; 12] = [
     2.8, 7.2, 8.0, 9.6, 13.2, 16.4, 24.4, 32.0, 48.0, 64.0, 96.0, 128.0,
 ];
-/// AMR-WB IO speech rates (kbit/s) for `FT 16..=24` (modes 0..=8). Mode 8
-/// shares the 24.55 kbit/s rate with mode 7 (as in RFC 4867).
-const IO_KBPS: [f32; 9] = [6.6, 8.85, 12.65, 14.25, 15.85, 18.25, 23.05, 24.55, 24.55];
+/// AMR-WB IO speech rates (kbit/s) for `FT 16..=24` (modes 0..=8), matching
+/// RFC 4867 / TS 26.201.
+const IO_KBPS: [f32; 9] = [6.6, 8.85, 12.65, 14.25, 15.85, 18.25, 19.85, 23.05, 23.85];
 
 /// Downlink speech frame size in bits for a speech frame type, or `None` for a
 /// non-speech or reserved frame. EVS Primary uses `kbps * 2.5` octets (i.e.
@@ -363,10 +503,10 @@ impl Payload {
         Self { cmr, frames }
     }
 
-    /// A single-frame payload carrying one speech frame.
+    /// A single-frame payload carrying one speech frame and a `NO_REQ` CMR.
     pub fn single_speech(ft: u8, data: Vec<u8>) -> Result<Self, EvsError> {
         Ok(Self {
-            cmr: Cmr::new(ModeSet::Wb, ft),
+            cmr: Cmr::no_request(),
             frames: vec![Frame::speech(ft, data)?],
         })
     }
@@ -513,11 +653,6 @@ mod tests {
     #[test]
     fn cmr_byte_round_trips_all_mode_sets() {
         for t in 0..8u8 {
-            if t >= 6 {
-                // T=6 (IO NB+WB) and T=7 are reserved and must not parse.
-                assert_eq!(Cmr::parse(0x80 | (t << 4) | 3), None, "t={t}");
-                continue;
-            }
             let d = 3;
             let cmr = Cmr::parse(0x80 | (t << 4) | d).unwrap();
             assert_eq!(ModeSet::from_t(t).unwrap(), cmr.mode_set);
@@ -526,21 +661,87 @@ mod tests {
     }
 
     #[test]
-    fn cmr_no_request_is_d_15() {
-        let cmr = Cmr::new(ModeSet::Wb, 15);
+    fn cmr_no_request_is_t111_d15() {
+        let cmr = Cmr::no_request();
         assert!(cmr.is_no_request());
-        assert_eq!(cmr.to_byte(), 0x80 | (1 << 4) | 15);
+        assert_eq!(cmr.to_byte(), 0xFF);
+        assert_eq!(cmr.request(), Some(ModeRequest::NoRequest));
         assert!(cmr.bitrate_kbps().is_none());
+        // D=15 with any other T is reserved, not a no-request.
+        assert!(!Cmr::new(ModeSet::Wb, 15).is_no_request());
     }
 
     #[test]
     fn cmr_bitrate_matches_table_a3() {
-        // T=0 NB mode 7 (12.2 kbit/s), T=1 WB mode 0 (6.6), T=2 FB mode 3 (64).
-        assert_eq!(Cmr::new(ModeSet::Nb, 7).bitrate_kbps(), Some(12.2));
-        assert_eq!(Cmr::new(ModeSet::Wb, 0).bitrate_kbps(), Some(6.6));
-        assert_eq!(Cmr::new(ModeSet::Fb, 3).bitrate_kbps(), Some(64.0));
-        // IO WB mode 7 is the top AMR-WB rate.
-        assert_eq!(Cmr::new(ModeSet::IoWb, 7).bitrate_kbps(), Some(24.55));
+        // T=000 (NB): D=0000 -> 5.9 VBR, D=0100 -> 13.2, D=0110 -> 24.4.
+        assert_eq!(Cmr::new(ModeSet::Nb, 0).bitrate_kbps(), Some(5.9));
+        assert_eq!(Cmr::new(ModeSet::Nb, 4).bitrate_kbps(), Some(13.2));
+        assert_eq!(Cmr::new(ModeSet::Nb, 6).bitrate_kbps(), Some(24.4));
+        assert_eq!(Cmr::new(ModeSet::Nb, 7).bitrate_kbps(), None);
+
+        // T=001 (IO): D=0000 -> 6.6 ... D=1000 -> 23.85.
+        assert_eq!(Cmr::new(ModeSet::Io, 0).bitrate_kbps(), Some(6.6));
+        assert_eq!(Cmr::new(ModeSet::Io, 7).bitrate_kbps(), Some(23.05));
+        assert_eq!(Cmr::new(ModeSet::Io, 8).bitrate_kbps(), Some(23.85));
+        assert_eq!(Cmr::new(ModeSet::Io, 9).bitrate_kbps(), None);
+
+        // T=010 (WB): D=0000 -> 5.9 ... D=1011 -> 128.
+        assert_eq!(Cmr::new(ModeSet::Wb, 0).bitrate_kbps(), Some(5.9));
+        assert_eq!(Cmr::new(ModeSet::Wb, 7).bitrate_kbps(), Some(32.0));
+        assert_eq!(Cmr::new(ModeSet::Wb, 11).bitrate_kbps(), Some(128.0));
+        assert_eq!(Cmr::new(ModeSet::Wb, 12).bitrate_kbps(), None);
+
+        // T=011 (SWB): first defined D is 0011 -> 9.6, last 1011 -> 128.
+        assert_eq!(Cmr::new(ModeSet::Swb, 2).bitrate_kbps(), None);
+        assert_eq!(Cmr::new(ModeSet::Swb, 3).bitrate_kbps(), Some(9.6));
+        assert_eq!(Cmr::new(ModeSet::Swb, 11).bitrate_kbps(), Some(128.0));
+
+        // T=100 (FB): first defined D is 0101 -> 16.4 ... 1011 -> 128.
+        assert_eq!(Cmr::new(ModeSet::Fb, 4).bitrate_kbps(), None);
+        assert_eq!(Cmr::new(ModeSet::Fb, 5).bitrate_kbps(), Some(16.4));
+        assert_eq!(Cmr::new(ModeSet::Fb, 11).bitrate_kbps(), Some(128.0));
+    }
+
+    #[test]
+    fn cmr_channel_aware_levels_and_offsets() {
+        // T=101 (WB CA): D=0000 -> CA-L-O2, D=0111 -> CA-H-O7.
+        let low = Cmr::new(ModeSet::WbChannelAware, 0).request().unwrap();
+        assert_eq!(
+            low,
+            ModeRequest::ChannelAware {
+                bandwidth: Bandwidth::Wideband,
+                high: false,
+                offset: 2
+            }
+        );
+        let high = Cmr::new(ModeSet::WbChannelAware, 7).request().unwrap();
+        assert_eq!(
+            high,
+            ModeRequest::ChannelAware {
+                bandwidth: Bandwidth::Wideband,
+                high: true,
+                offset: 7
+            }
+        );
+        assert_eq!(high.kbps(), Some(13.2));
+        // T=110 (SWB CA).
+        assert_eq!(
+            Cmr::new(ModeSet::SwbChannelAware, 2).request().unwrap(),
+            ModeRequest::ChannelAware {
+                bandwidth: Bandwidth::SuperWideband,
+                high: false,
+                offset: 5
+            }
+        );
+    }
+
+    #[test]
+    fn io_speech_bits_match_amr_wb() {
+        // FT 16..=24 speech bits: 132,177,253,285,317,365,397,461,477.
+        let expected = [132, 177, 253, 285, 317, 365, 397, 461, 477];
+        for (mode, &bits) in expected.iter().enumerate() {
+            assert_eq!(speech_bits(16 + mode as u8), Some(bits));
+        }
     }
 
     #[test]
@@ -579,13 +780,14 @@ mod tests {
 
     #[test]
     fn single_frame_header_full_round_trip() {
-        // CMR: H=1, T=1 (WB), D=7 => 0x97; ToC: H=0, F=0, FT=7 => 0x07.
+        // CMR: H=1, T=2 (WB), D=7 (32 kbit/s) => 0xA7;
+        // ToC: H=0, F=0, FT=7 => 0x07.
         let p = Payload::new(
             Cmr::new(ModeSet::Wb, 7),
             vec![Frame::speech(7, primary_speech(7)).unwrap()],
         );
         let bytes = p.to_bytes().unwrap();
-        assert_eq!(&bytes[..2], &[0x97, 0x07]);
+        assert_eq!(&bytes[..2], &[0xA7, 0x07]);
         assert_eq!(bytes.len(), 2 + 80);
         let parsed = Payload::parse(&bytes).unwrap();
         assert_eq!(parsed, p);
@@ -596,7 +798,7 @@ mod tests {
     fn multi_frame_f_bit_glues_frames() {
         // Primary speech FT=0 then FT=4 (33 bytes) then AMR-WB IO mode 0 (FT=16).
         let p = Payload::new(
-            Cmr::new(ModeSet::IoWb, 0),
+            Cmr::new(ModeSet::Io, 0),
             vec![
                 Frame::speech(0, primary_speech(0)).unwrap(),
                 Frame::speech(4, primary_speech(4)).unwrap(),
@@ -617,7 +819,7 @@ mod tests {
     #[test]
     fn sid_lost_nodata_classification() {
         let p = Payload::new(
-            Cmr::new(ModeSet::Wb, 15),
+            Cmr::no_request(),
             vec![
                 Frame::primary_sid(vec![0x11; 6]).unwrap(),
                 Frame::io_sid(vec![0x80; 7]).unwrap(),
@@ -649,9 +851,9 @@ mod tests {
 
     #[test]
     fn reserved_frame_type_is_rejected() {
-        // CMR=WB/7 (0x97), ToC F=0 FT=13 => 0x0D.
+        // CMR=WB/7 (0xA7), ToC F=0 FT=13 => 0x0D.
         assert_eq!(
-            Payload::parse(&[0x97, 0x0D]).unwrap_err(),
+            Payload::parse(&[0xA7, 0x0D]).unwrap_err(),
             EvsError::ReservedFrameType(13)
         );
     }
@@ -723,7 +925,7 @@ mod tests {
             PayloadFormat::MultiChannel,
         ] {
             assert_eq!(
-                Payload::parse_mode(&[0x97, 0x07], format),
+                Payload::parse_mode(&[0xA7, 0x07], format),
                 Err(EvsError::Unsupported)
             );
             let p = Payload::single_speech(7, primary_speech(7)).unwrap();

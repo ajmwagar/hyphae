@@ -259,23 +259,28 @@ fn rtp_001_rfc4867_octet_aligned_round_trip() {
 #[test]
 fn evs_001_cmr_toc_byte_round_trips() {
     use evs::rtp::{Cmr, ModeSet, Payload};
-    // CMR: H=1, T=1 (WB), D=7 => 0x97; ToC: H=0, F=0, FT=7 => 0x07. The EVS
-    // Header-Full ToC has no Q/P bits, so the round-trip is byte-exact.
+    // CMR: H=1, T=2 (WB), D=7 (32 kbit/s) => 0xA7;
+    // ToC: H=0, F=0, FT=7 => 0x07. The EVS Header-Full ToC has no Q/P bits,
+    // so the round-trip is byte-exact.
     let p = Payload::new(
         Cmr::new(ModeSet::Wb, 7),
         vec![evs::rtp::Frame::speech(7, vec![0xA5; 80]).unwrap()],
     );
     let bytes = p.to_bytes().unwrap();
-    assert_eq!(&bytes[..2], &[0x97, 0x07]);
+    assert_eq!(&bytes[..2], &[0xA7, 0x07]);
     assert_eq!(bytes.len(), 2 + 80);
     assert_eq!(Payload::parse(&bytes).unwrap(), p);
     // The CMR byte round-trips its T/D fields exactly.
-    assert_eq!(Cmr::parse(bytes[0]).unwrap().to_byte(), 0x97);
+    assert_eq!(Cmr::parse(bytes[0]).unwrap().to_byte(), 0xA7);
+    // Table A.3: the T/D pair decodes to the right requested rate.
+    assert_eq!(Cmr::new(ModeSet::Wb, 7).bitrate_kbps(), Some(32.0));
+    assert_eq!(Cmr::new(ModeSet::Io, 8).bitrate_kbps(), Some(23.85));
+    assert!(Cmr::no_request().is_no_request());
 }
 
 #[test]
 fn evs_001_frame_table_classification() {
-    use evs::rtp::{classify_ft, Cmr, FrameKind, ModeSet, Payload};
+    use evs::rtp::{classify_ft, Cmr, FrameKind, Payload};
     // Every defined frame type classifies to its EVS kind.
     assert_eq!(classify_ft(0), FrameKind::PrimarySpeech { ft: 0 });
     assert_eq!(classify_ft(12), FrameKind::PrimarySid);
@@ -289,7 +294,7 @@ fn evs_001_frame_table_classification() {
 
     // A mixed payload reports the right kinds end to end.
     let p = Payload::new(
-        Cmr::new(ModeSet::Wb, 15),
+        Cmr::no_request(),
         vec![
             evs::rtp::Frame::primary_sid(vec![0x11; 6]).unwrap(),
             evs::rtp::Frame::lost(true),
@@ -326,7 +331,7 @@ fn evs_001_multi_frame_round_trips() {
     // Primary speech FT=0 (7 bytes), then FT=4 (33 bytes), then AMR-WB IO
     // mode 0 (FT=16, 17 bytes) in one multi-frame payload.
     let p = Payload::new(
-        Cmr::new(ModeSet::IoWb, 0),
+        Cmr::new(ModeSet::Io, 0),
         vec![
             Frame::speech(0, vec![0xA5; 7]).unwrap(),
             Frame::speech(4, vec![0xA5; 33]).unwrap(),
@@ -354,7 +359,7 @@ fn evs_001_compact_format_is_rejected() {
         PayloadFormat::MultiChannel,
     ] {
         assert_eq!(
-            Payload::parse_mode(&[0x97, 0x07], format),
+            Payload::parse_mode(&[0xA7, 0x07], format),
             Err(evs::EvsError::Unsupported)
         );
     }
