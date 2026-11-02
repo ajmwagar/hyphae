@@ -48,6 +48,89 @@ impl Attribute {
     }
 }
 
+/// RFC 4566 §6 / RFC 3264 §6.1 media direction. Absent means `sendrecv`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    SendRecv,
+    SendOnly,
+    RecvOnly,
+    Inactive,
+}
+
+impl Direction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::SendRecv => "sendrecv",
+            Direction::SendOnly => "sendonly",
+            Direction::RecvOnly => "recvonly",
+            Direction::Inactive => "inactive",
+        }
+    }
+
+    /// The answer direction for an offer (RFC 3264 §6.1), used for hold: an
+    /// offer of `sendonly` is answered `recvonly`, and `inactive` stays
+    /// `inactive`.
+    pub fn answer_to(offer: Direction) -> Self {
+        match offer {
+            Direction::SendRecv => Direction::SendRecv,
+            Direction::SendOnly => Direction::RecvOnly,
+            Direction::RecvOnly => Direction::SendOnly,
+            Direction::Inactive => Direction::Inactive,
+        }
+    }
+}
+
+impl Media {
+    /// The `a=sendrecv`/`a=sendonly`/`a=recvonly`/`a=inactive` direction.
+    ///
+    /// Direction attributes are flags (no value), so this tests presence rather
+    /// than `attribute()` (which returns the value and is `None` for a flag).
+    pub fn direction(&self) -> Direction {
+        let has = |name: &str| {
+            self.attributes
+                .iter()
+                .any(|a| a.name.eq_ignore_ascii_case(name))
+        };
+        if has("sendonly") {
+            Direction::SendOnly
+        } else if has("recvonly") {
+            Direction::RecvOnly
+        } else if has("inactive") {
+            Direction::Inactive
+        } else {
+            Direction::SendRecv
+        }
+    }
+
+    /// Replace the direction attribute, keeping only one of the four.
+    pub fn set_direction(&mut self, direction: Direction) {
+        self.attributes.retain(|a| {
+            !matches!(
+                a.name.as_str(),
+                "sendrecv" | "sendonly" | "recvonly" | "inactive"
+            )
+        });
+        self.attributes
+            .push(Attribute::new(direction.as_str(), None::<String>));
+    }
+}
+
+impl Sdp {
+    /// Set the direction on every media line (used for hold/resume offers).
+    pub fn set_direction(&mut self, direction: Direction) {
+        for media in &mut self.media {
+            media.set_direction(direction);
+        }
+    }
+
+    /// The direction of the first audio media line.
+    pub fn direction(&self) -> Direction {
+        self.audio()
+            .map(Media::direction)
+            .unwrap_or(Direction::SendRecv)
+    }
+}
+
 /// RFC 3312 precondition direction value (`send`, `recv`, `sendrecv`, `none`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrecondDir {
@@ -464,7 +547,12 @@ impl Sdp {
             ),
             Attribute::new("fmtp", Some(format!("{payload} {fmtp}"))),
             Attribute::new("ptime", Some("20")),
-            Attribute::new("sendrecv", None::<String>),
+            // RFC 3264 §6.1: the answer mirrors the offered direction, so a
+            // remote hold (sendonly) is answered recvonly.
+            Attribute::new(
+                Direction::answer_to(media.direction()).as_str(),
+                None::<String>,
+            ),
         ];
         // Echo telephone-event if offered; it is harmless and expected by MTSI.
         if let Some(evt) = media.payload_type("telephone-event", 16_000) {

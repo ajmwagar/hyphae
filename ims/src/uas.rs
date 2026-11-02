@@ -257,18 +257,33 @@ impl IncomingCall {
     pub fn on_request(&mut self, request: &Request) -> Result<UasEvent, UasError> {
         match request.method {
             Method::Ack => {
-                if self.state != UasState::Accepted {
-                    return Err(UasError::WrongState("ACK before 200 OK"));
+                match self.state {
+                    UasState::Accepted => {
+                        self.state = UasState::Confirmed;
+                        self.dialog.confirm();
+                        Ok(UasEvent::Established)
+                    }
+                    // ACK for a re-INVITE: the dialog is already confirmed and
+                    // the new session description is in effect.
+                    UasState::Confirmed => Ok(UasEvent::Established),
+                    _ => Err(UasError::WrongState("ACK before 200 OK")),
                 }
-                self.state = UasState::Confirmed;
-                self.dialog.confirm();
-                Ok(UasEvent::Established)
             }
             Method::Prack => {
                 // 200 to the PRACK itself (RFC 3262 §4). RAck is on the request.
                 Ok(UasEvent::Respond(self.response_to(request, 200, "OK", &[])))
             }
-            Method::Update => Ok(UasEvent::Respond(self.response_to(request, 200, "OK", &[]))),
+            // A re-INVITE or an in-dialog UPDATE that carries an offer must be
+            // answered with a session description (RFC 3264 §6): hold/resume
+            // arrive this way.
+            Method::Invite => Ok(UasEvent::Respond(self.renegotiate(request)?)),
+            Method::Update => {
+                if request.body.is_empty() {
+                    Ok(UasEvent::Respond(self.response_to(request, 200, "OK", &[])))
+                } else {
+                    Ok(UasEvent::Respond(self.renegotiate(request)?))
+                }
+            }
             Method::Info => Ok(UasEvent::Respond(self.response_to(request, 200, "OK", &[]))),
             Method::Options => {
                 let allow = "INVITE,ACK,CANCEL,BYE,UPDATE,PRACK,INFO,MESSAGE";
@@ -302,6 +317,33 @@ impl IncomingCall {
             }
             _ => Ok(UasEvent::Ignored),
         }
+    }
+
+    /// Answer a re-INVITE or in-dialog UPDATE that carries a session
+    /// description, storing the new answer as the current one.
+    ///
+    /// The offered direction is mirrored, so a remote hold (`sendonly`) produced
+    /// a `recvonly` answer (RFC 3264 §6.1).
+    pub fn renegotiate(&mut self, request: &Request) -> Result<Response, UasError> {
+        if request.body.is_empty() {
+            return Err(UasError::MissingHeader(
+                "SDP body on a renegotiating request",
+            ));
+        }
+        let text = core::str::from_utf8(&request.body)
+            .map_err(|_| UasError::BadOffer("body is not UTF-8".into()))?;
+        let offer = Sdp::parse(text).map_err(|e| UasError::BadOffer(e.to_string()))?;
+        let answer = Sdp::answer_amr_wb(&offer, &self.profile.contact_host)
+            .map_err(|e| UasError::BadAnswer(e.to_string()))?;
+        let body = answer.to_text().into_bytes();
+        self.answer = Some(answer);
+        Ok(self.response_to_body(
+            request,
+            200,
+            "OK",
+            &[("Content-Type", "application/sdp")],
+            body,
+        ))
     }
 
     /// Build the in-dialog BYE the callee sends to hang up.
@@ -600,5 +642,106 @@ mod tests {
         let mut req = invite();
         req.method = Method::Options;
         assert!(IncomingCall::from_invite(&req, ImsProfile::lab_default()).is_err());
+    }
+
+    fn renegotiating_request(method: Method, offer: &str) -> Request {
+        let mut headers = Headers::new();
+        headers.push(Header::new(
+            "From",
+            "<sip:001010000000002@ims.example>;tag=caller-tag",
+        ));
+        headers.push(Header::new(
+            "To",
+            "<sip:001010000000001@ims.example>;tag=uas-5060",
+        ));
+        headers.push(Header::new("Call-ID", "caller-call-1"));
+        headers.push(Header::new("CSeq", format!("5 {method}")));
+        headers.push(Header::new("Content-Type", "application/sdp"));
+        Request {
+            method,
+            uri: "sip:001010000000001@ims.example".into(),
+            headers,
+            body: offer.as_bytes().to_vec(),
+        }
+    }
+
+    fn hold_offer() -> String {
+        let mut sdp = crate::Sdp::amr_wb_offer(&[0, 1, 2, 3], true, "192.0.2.20");
+        sdp.set_direction(crate::sdp::Direction::SendOnly);
+        sdp.to_text()
+    }
+
+    #[test]
+    fn reinvite_is_answered_and_mirrors_the_hold_direction() {
+        let mut u = uas();
+        u.ringing();
+        let _ = u.accept().unwrap();
+        // ACK the initial INVITE.
+        let mut ack_headers = Headers::new();
+        ack_headers.push(Header::new("CSeq", "1 ACK"));
+        let ack = Request {
+            method: Method::Ack,
+            uri: "sip:001010000000001@ims.example".into(),
+            headers: ack_headers,
+            body: Vec::new(),
+        };
+        assert_eq!(u.on_request(&ack).unwrap(), UasEvent::Established);
+
+        // A re-INVITE offering sendonly (remote hold) is answered recvonly.
+        let reinvite = renegotiating_request(Method::Invite, &hold_offer());
+        match u.on_request(&reinvite).unwrap() {
+            UasEvent::Respond(r) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.headers.get("content-type"), Some("application/sdp"));
+                let body = String::from_utf8(r.body.clone()).unwrap();
+                assert!(
+                    body.contains("a=recvonly"),
+                    "answer must mirror hold: {body}"
+                );
+                assert!(!body.contains("a=sendonly"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            u.answer().map(crate::Sdp::direction),
+            Some(crate::sdp::Direction::RecvOnly)
+        );
+    }
+
+    #[test]
+    fn update_with_an_offer_is_renegotiated() {
+        let mut u = uas();
+        u.ringing();
+        let _ = u.accept().unwrap();
+        let update = renegotiating_request(Method::Update, &hold_offer());
+        match u.on_request(&update).unwrap() {
+            UasEvent::Respond(r) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.headers.get("content-type"), Some("application/sdp"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_without_an_offer_is_a_plain_200() {
+        let mut u = uas();
+        u.ringing();
+        let _ = u.accept().unwrap();
+        let mut headers = Headers::new();
+        headers.push(Header::new("CSeq", "9 UPDATE"));
+        let update = Request {
+            method: Method::Update,
+            uri: "sip:001010000000001@ims.example".into(),
+            headers,
+            body: Vec::new(),
+        };
+        match u.on_request(&update).unwrap() {
+            UasEvent::Respond(r) => {
+                assert_eq!(r.status, 200);
+                assert!(r.body.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

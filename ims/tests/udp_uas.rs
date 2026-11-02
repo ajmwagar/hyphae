@@ -124,7 +124,7 @@ fn udp_incoming_call_reaches_established() {
                 break;
             }
             CallEvent::Failed(status) => panic!("call failed with {status}"),
-            CallEvent::Provisional => {}
+            CallEvent::Provisional | CallEvent::Renegotiated { .. } => {}
         }
     }
     assert!(acked, "caller never reached Established");
