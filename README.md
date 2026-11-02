@@ -7,11 +7,11 @@ SDP, carrier profiles and a codec-agnostic media boundary.
 
 Status: **spec matrix green**. The control-plane state machine, Milenage/AKA,
 SDP offer/answer with RFC 3312 preconditions, RFC 4867 payload format, SMS over
-IMS, the caller-side call path, carrier loader and both mock and modem-modeled
-transports compile and have spec-derived tests. The standalone CLI works in
-mock/lab mode. RTP/RTCP media framing, real IPsec SA/crypto, the byte-level
-AT/QMI I/O and the vendor CCCI channel are the remaining stubbed or
-product-gated rows (see [`docs/specs.md`](docs/specs.md)).
+IMS, the caller-side call path, carrier loader, RTP/RTCP media framing (RFC 3550
+plus a jitter buffer and PLC) and both mock and modem-modeled transports compile
+and have spec-derived tests. The standalone CLI works in mock/lab mode. Real
+IPsec SA/crypto, the byte-level AT/QMI I/O and the vendor CCCI channel are the
+remaining stubbed or product-gated rows (see [`docs/specs.md`](docs/specs.md)).
 
 ## Why it matters
 
@@ -48,6 +48,7 @@ ims/        profile, REGISTER/401/407, SDP offer/answer, PRACK/UPDATE/BYE
 carrier/    TOML profiles keyed by MCC/MNC + lab profile 00101
 codec/      Codec trait + optional Opus (feature `opus`); PCM only
 codec-amr/  RFC 4867 payload format + optional AMR-WB FFI (separate package)
+media/      RTP/RTCP framing (RFC 3550), jitter buffer and PLC around codec-amr
 transport/  Transport trait + in-memory MockTransport
 tests/      conformance harness + golden fixtures with spec citations
 lab/        docker-compose plan for Open5GS + Kamailio IMS + USIM
@@ -60,7 +61,7 @@ The protocol crates never start a thread, open a socket, or link a codec.
 
 ```sh
 cargo check --workspace
-cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p transport -p conformance
+cargo test -p sip -p aka -p ims -p carrier -p codec -p codec-amr -p media -p transport -p conformance
 cargo run -p ims --example register_flow
 cargo run -p ims --example call_flow
 ```

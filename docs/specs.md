@@ -38,7 +38,7 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | SMS-001 | SMS over IMS (RP/CP and SIP MESSAGE) | 3GPP TS 24.341; GSMA IR.92 §5 | `sms_001_sip_message_carries_rp_data`, `pdu_round_trips_destination_and_text` | ims |
 | EVS-001 | EVS negotiation and codec package | 3GPP TS 26.445; GSMA IR.92 (EVS) | **TODO** (separate patent-noticed package) | codec-* |
 | E911-001 | Emergency session identity and call routing | 3GPP TS 24.229 §5.1.6; local regulation | **TODO** (product gate) | ims |
-| MEDIA-001 | RTP/RTCP framing, jitter buffer, PLC | RFC 3550; RFC 4867 §9 | **TODO** (phase 3) | new media crate |
+| MEDIA-001 | RTP/RTCP framing, jitter buffer, PLC | RFC 3550; RFC 4867 §9 | `media_001_rtp_amr_frame_round_trips_the_wire`, `media_001_rtcp_sender_report_survives_the_wire`, `media_001_jitter_buffer_reorders_and_flags_loss`, `media_001_plc_conceals_a_lost_frame` | media |
 | TRN-001 | AT/QMI transport on a modem-managed IMS PDN | 3GPP TS 27.007; QMI IMS | `local_addr_is_the_modem_pdn_address`, `delivers_over_the_pdn_loopback` | transport |
 | TRN-002 | MTK CCCI backend | Vendor channel; no vendor code may enter the tree | **TODO** (phase 5) | transport |
 
@@ -55,5 +55,10 @@ module. "TODO" rows are deliberately not claimed as implemented.
   `TRN-001` (modem IMS PDN, `transport::modem`) cover the *contract* and wire
   shape — RFC 4303 frame round-trip and modem-assigned PDN addressing — but the
   IKEv2 SA/key derivation and the AT/QMI byte-level I/O remain documented stubs
-  pending a kernel SA and a modem device. `MEDIA-001`, `EVS-001`, `E911-001`
-  (product gate) and `TRN-002` (vendor channel) are not yet claimed.
+  pending a kernel SA and a modem device. `EVS-001`, `E911-001` (product gate)
+  and `TRN-002` (vendor channel) are not yet claimed.
+* **Media path.** The `media` crate frames RTP/RTCP and buffers playout. It
+  wraps the [`codec-amr`] payload (RFC 4867 §9) but never decodes speech, so it
+  stays royalty-free; the AMR-WB/EVS codec itself is still the separate
+  feature-gated package. Real network I/O is [`transport`]; `media` is
+  socket-free and tested over in-memory packets.
