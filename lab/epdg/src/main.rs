@@ -54,8 +54,51 @@ fn client() -> UeClient {
     .expect("client parameters are valid")
 }
 
+#[cfg(feature = "pcsc")]
+fn client_with_pcsc(reader: Option<&str>) -> UeClient {
+    let channel = usim_pcsc::PcscChannel::open(reader).unwrap_or_else(|e| {
+        eprintln!("hyphae-epdg: {e}");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "hyphae-epdg: USIM reader {:?}; the stand-in ePDG uses TS 35.208 test set 1",
+        channel.reader()
+    );
+    UeClient::with_usim(
+        TEST_NETWORK,
+        TEST_IDENTITY,
+        Box::new(usim::UsimCard::new(channel)),
+        [0x11; 8],
+        &[0x22; 32],
+        vec![0x33; 32],
+        GROUP,
+        [0x00, 0x00, 0x10, 0x01],
+    )
+    .expect("client parameters are valid")
+}
+
+#[cfg(not(feature = "pcsc"))]
+fn client_with_pcsc(_reader: Option<&str>) -> UeClient {
+    eprintln!("hyphae-epdg: PC/SC support not built; rebuild with --features pcsc");
+    std::process::exit(2);
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Optional `--pcsc [READER]` applies to the UE side; it is removed before
+    // the listen/connect parsing so the existing CLI shape stays intact.
+    let mut pcsc: Option<Option<String>> = None;
+    if let Some(pos) = args.iter().position(|a| a == "--pcsc") {
+        let reader = args
+            .get(pos + 1)
+            .filter(|value| !value.starts_with("--"))
+            .cloned();
+        args.remove(pos);
+        if reader.is_some() {
+            args.remove(pos);
+        }
+        pcsc = Some(reader);
+    }
     match args.first().map(String::as_str) {
         Some("--listen") => {
             let addr = args
@@ -73,19 +116,19 @@ fn main() {
                 eprintln!("hyphae-epdg: bad address {addr:?}: {e}");
                 std::process::exit(2);
             });
-            run_client(addr);
+            run_client(addr, pcsc);
         }
         Some(other) => {
             eprintln!("hyphae-epdg: unknown argument {other:?}");
             eprintln!("usage: epdg-lab [--listen ADDR | --connect ADDR]");
             std::process::exit(2);
         }
-        None => loopback(),
+        None => loopback(pcsc),
     }
 }
 
 /// Start a responder on `addr` and drive a client at it.
-fn loopback() {
+fn loopback(pcsc: Option<Option<String>>) {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind loopback");
     socket
         .set_read_timeout(Some(TIMEOUT))
@@ -93,7 +136,7 @@ fn loopback() {
     let addr = socket.local_addr().expect("local addr");
 
     let server = thread::spawn(move || serve_socket(socket));
-    run_client(addr);
+    run_client(addr, pcsc);
     server.join().expect("responder thread");
 }
 
@@ -159,13 +202,16 @@ fn serve_socket(socket: UdpSocket) {
     }
 }
 
-fn run_client(addr: SocketAddr) {
+fn run_client(addr: SocketAddr, pcsc: Option<Option<String>>) {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind client");
     socket
         .set_read_timeout(Some(TIMEOUT))
         .expect("read timeout");
     socket.connect(addr).expect("connect");
-    let mut client = client();
+    let mut client = match pcsc {
+        Some(reader) => client_with_pcsc(reader.as_deref()),
+        None => client(),
+    };
     let mut buf = [0u8; 4096];
 
     socket

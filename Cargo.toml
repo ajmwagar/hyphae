@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# Optional hardware PC/SC adapter is built explicitly; keep the default
+# workspace pure-Rust.
+exclude = ["usim-pcsc"]
 members = [
     "sip",
     "aka",

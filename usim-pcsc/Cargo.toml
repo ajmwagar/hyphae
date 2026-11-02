@@ -1,0 +1,15 @@
+[package]
+name = "usim-pcsc"
+description = "PC/SC (libpcsclite / macOS PCSC) ApduChannel for a physical USIM"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+
+[dependencies]
+usim = { path = "../usim" }
+pcsc = "2"
+
+[[bin]]
+name = "usim-pcsc"
+path = "src/main.rs"

@@ -11,3 +11,8 @@ publish = false
 aka = { workspace = true }
 epdg = { workspace = true }
 transport = { workspace = true }
+usim = { workspace = true }
+usim-pcsc = { path = "../../usim-pcsc", optional = true }
+
+[features]
+pcsc = ["dep:usim-pcsc"]

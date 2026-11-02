@@ -122,6 +122,67 @@ mod tests {
     }
 
     #[test]
+    fn a_usim_backed_client_completes_the_exchange() {
+        use usim::{LoopbackChannel, SoftwareUsim, UsimCard};
+
+        let group = 14;
+        // The stand-in responder uses SQN 1; a card with the same SQN accepts
+        // the challenge. This is the same boundary a PC/SC card uses.
+        let usim = SoftwareUsim::with_opc(TEST_K, TEST_OPC, [0, 0, 0, 0, 0, 1]);
+        let card = UsimCard::new(LoopbackChannel::new(usim));
+        let mut client = UeClient::with_usim(
+            TEST_NETWORK,
+            TEST_IDENTITY,
+            Box::new(card),
+            [0x11; 8],
+            &[0x22; 32],
+            vec![0x33; 32],
+            group,
+            [0x00, 0x00, 0x10, 0x01],
+        )
+        .unwrap();
+        let mut responder = StandInEpdg::new(
+            TEST_NETWORK,
+            TEST_K,
+            TEST_OPC,
+            group,
+            vec![0x55; 32],
+            [0x44; 8],
+            vec![0x66; 32],
+            [0x00, 0x00, 0x10, 0x00],
+            [10, 32, 0, 7],
+            [10, 32, 0, 1],
+        );
+
+        let sa_init = client.sa_init_request();
+        let sa_init_response = responder.on_sa_init(&sa_init).unwrap();
+        let first_auth = client.on_sa_init_response(&sa_init_response).unwrap();
+        let challenge = responder.on_ike_auth(&first_auth, &[0x11; 16]).unwrap();
+        let Reply::Send(challenge) = challenge else {
+            panic!("expected a challenge");
+        };
+        let (eap_response, _) = client.on_ike_auth(&challenge).unwrap();
+        let eap_response = eap_response.expect("the USIM answers the challenge");
+        let success = responder.on_ike_auth(&eap_response, &[0x22; 16]).unwrap();
+        let Reply::Send(success) = success else {
+            panic!("expected EAP success");
+        };
+        let (client_auth, _) = client.on_ike_auth(&success).unwrap();
+        let client_auth = client_auth.expect("the client sends AUTH after success");
+        let done = responder.on_ike_auth(&client_auth, &[0x33; 16]).unwrap();
+        let Reply::Established {
+            bytes, ims_address, ..
+        } = done
+        else {
+            panic!("expected the exchange to complete");
+        };
+        let (_, established) = client.on_ike_auth(&bytes).unwrap();
+        let established = established.expect("the USIM-backed client finished");
+        assert_eq!(established.ims_address, Some(ims_address));
+        assert_eq!(established.child_keys.len(), 128);
+    }
+
+    #[test]
     fn a_wrong_subscriber_key_is_rejected() {
         let group = 14;
         let mut client = UeClient::new(
