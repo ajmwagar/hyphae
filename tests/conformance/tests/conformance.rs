@@ -3428,3 +3428,103 @@ fn media_002_a_session_captures_sends_receives_and_plays() {
     assert!(concealed > 0);
     assert!(!session.take_losses().is_empty());
 }
+
+// --- MWI-001: message waiting indication --------------------------------
+
+#[test]
+fn mwi_001_message_waiting_subscription() {
+    use ims::mwi::{
+        Counts, MessageClass, MessageSummary, MessageSummaryClient, SubscriptionState,
+        MESSAGE_SUMMARY_EVENT, MESSAGE_SUMMARY_MIME,
+    };
+
+    // RFC 3842 §7.1/§7.2: the event package and body type.
+    assert_eq!(MESSAGE_SUMMARY_EVENT, "message-summary");
+    assert_eq!(MESSAGE_SUMMARY_MIME, "application/simple-message-summary");
+
+    let mut client = MessageSummaryClient::new(
+        "sip:001010000000001@ims.example",
+        "sip:001010000000001@192.0.2.10:5060",
+        "ue1",
+        "mwi-call-1",
+    );
+
+    // The UE subscribes to its own summary.
+    let subscribe = client.subscribe(3600);
+    assert_eq!(subscribe.method, sip::Method::Subscribe);
+    assert_eq!(subscribe.uri, "sip:001010000000001@ims.example");
+    assert_eq!(subscribe.headers.get("event"), Some(MESSAGE_SUMMARY_EVENT));
+    assert_eq!(subscribe.headers.get("accept"), Some(MESSAGE_SUMMARY_MIME));
+    assert_eq!(subscribe.headers.get("expires"), Some("3600"));
+
+    // RFC 3842 §3.8: a NOTIFY with the current summary arrives immediately
+    // after the subscription is accepted.
+    let body = "Messages-Waiting: yes\r\n\
+                Message-Account: sip:*98@vmail.example.com\r\n\
+                Voice-Message: 2/8 (0/2)\r\n";
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new(
+        "Via",
+        "SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-m",
+    ));
+    headers.push(sip::Header::new("From", "<sip:vmail@example.com>;tag=v"));
+    headers.push(sip::Header::new(
+        "To",
+        "<sip:001010000000001@ims.example>;tag=ue1",
+    ));
+    headers.push(sip::Header::new("Call-ID", "mwi-call-1"));
+    headers.push(sip::Header::new("CSeq", "2 NOTIFY"));
+    headers.push(sip::Header::new("Event", MESSAGE_SUMMARY_EVENT));
+    headers.push(sip::Header::new(
+        "Subscription-State",
+        "active;expires=3600",
+    ));
+    headers.push(sip::Header::new("Content-Type", MESSAGE_SUMMARY_MIME));
+    let notify = sip::Request {
+        method: sip::Method::Notify,
+        uri: "sip:001010000000001@ims.example".into(),
+        headers,
+        body: body.as_bytes().to_vec(),
+    };
+
+    let update = client.on_notify(&notify).expect("a message-summary NOTIFY");
+    assert_eq!(update.subscription_state, SubscriptionState::Active);
+    assert!(update.summary.has_messages());
+    assert_eq!(
+        update.summary.voice(),
+        Some(Counts {
+            new: 2,
+            old: 8,
+            new_urgent: Some(0),
+            old_urgent: Some(2),
+        })
+    );
+    assert_eq!(
+        update.summary.account.as_deref(),
+        Some("sip:*98@vmail.example.com")
+    );
+
+    // All six RFC 3458 §6.2 context classes parse.
+    for (name, class) in [
+        ("Voice-Message", MessageClass::Voice),
+        ("Fax-Message", MessageClass::Fax),
+        ("Pager-Message", MessageClass::Pager),
+        ("Multimedia-Message", MessageClass::Multimedia),
+        ("Text-Message", MessageClass::Text),
+        ("None", MessageClass::None),
+    ] {
+        assert_eq!(MessageClass::parse(name), Some(class));
+    }
+
+    // A counter past 2^32-1 is treated as the maximum (RFC 3842 §3.3).
+    let clamped =
+        MessageSummary::parse("Messages-Waiting: yes\r\nVoice-Message: 99999999999/0\r\n").unwrap();
+    assert_eq!(clamped.voice().unwrap().new, u32::MAX);
+
+    // RFC 3842 §3.6: unsubscribe with Expires 0, same Call-ID and CSeq bumped.
+    let stop = client.unsubscribe();
+    assert_eq!(stop.headers.get("expires"), Some("0"));
+    assert_eq!(stop.headers.get("call-id"), Some("mwi-call-1"));
+    // One subscribe above, so this is the second request on the dialog.
+    assert_eq!(stop.headers.get("cseq"), Some("2 SUBSCRIBE"));
+}
