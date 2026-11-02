@@ -122,7 +122,7 @@ impl Dialog {
         self.remote_tag = extract_tag(to_header).unwrap_or_default();
     }
 
-    /// ACK for a 2xx INVITE: RFC 3261 §13.2.2.4, same CSeq number.
+    /// ACK for a 2xx INVITE: RFC 3261 §13.2.2.4, same CSeq number.    /// ACK for a 2xx INVITE: RFC 3261 §13.2.2.4, same CSeq number.
     pub fn ack(&mut self) -> Request {
         let uri = self
             .route_set
@@ -130,6 +130,36 @@ impl Dialog {
             .cloned()
             .unwrap_or_else(|| self.remote_uri.clone());
         self.request(Method::Ack, uri, self.invite_cseq)
+    }
+
+    /// In-dialog re-INVITE carrying a new session description (RFC 3261 §14.1),
+    /// used for hold/resume. Returns the CSeq so the matching ACK can reuse it.
+    pub fn reinvite(&mut self, sdp: &str) -> (u32, Request) {
+        let uri = self
+            .route_set
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.remote_uri.clone());
+        self.cseq += 1;
+        let cseq = self.cseq;
+        let mut req = self.request(Method::Invite, uri, cseq);
+        req.headers
+            .push(Header::new("Content-Type", "application/sdp"));
+        req.headers.push(Header::new("Supported", "100rel"));
+        req.body = sdp.as_bytes().to_vec();
+        req.headers
+            .set("Content-Length", req.body.len().to_string());
+        (cseq, req)
+    }
+
+    /// ACK for a re-INVITE: it must reuse the re-INVITE's CSeq number.
+    pub fn ack_with_cseq(&mut self, cseq: u32) -> Request {
+        let uri = self
+            .route_set
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.remote_uri.clone());
+        self.request(Method::Ack, uri, cseq)
     }
 
     /// PRACK for a reliable provisional response: RFC 3262 §4.

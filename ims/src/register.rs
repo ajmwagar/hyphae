@@ -49,6 +49,13 @@ pub struct Registration {
     branch_counter: u32,
     /// Security-Server values learned from the challenge, echoed as Security-Verify.
     security_server: Vec<String>,
+    /// Additional bindings carried as extra `Contact` headers.
+    extra_contacts: Vec<(String, Option<u32>)>,
+    /// Address-of-record in `To` when registering on behalf of another IMPU
+    /// (third-party registration). `None` means the profile's own IMPU.
+    to_identity: Option<String>,
+    /// Index of the P-CSCF currently in use, for failover.
+    p_cscf_index: usize,
 }
 
 impl Registration {
@@ -75,6 +82,9 @@ impl Registration {
             cseq: 0,
             branch_counter: 0,
             security_server: Vec::new(),
+            extra_contacts: Vec::new(),
+            to_identity: None,
+            p_cscf_index: 0,
         }
     }
 
@@ -132,6 +142,61 @@ impl Registration {
     pub fn set_contact(&mut self, host: impl Into<String>, port: u16) {
         self.profile.contact_host = host.into();
         self.profile.contact_port = port;
+    }
+
+    /// Bind an additional contact (RFC 3261 §10.2): the UE may register more
+    /// than one device/interface for the same IMPU. Every `Contact` is sent in
+    /// the same REGISTER.
+    pub fn add_contact(&mut self, contact_uri: impl Into<String>, expires: Option<u32>) {
+        self.extra_contacts.push((contact_uri.into(), expires));
+    }
+
+    /// The additional contacts currently bound.
+    pub fn extra_contacts(&self) -> &[(String, Option<u32>)] {
+        &self.extra_contacts
+    }
+
+    /// Remove every additional contact (leaving only the primary one).
+    pub fn clear_contacts(&mut self) {
+        self.extra_contacts.clear();
+    }
+
+    /// Register on behalf of another IMPU: the `To` address-of-record becomes
+    /// `target` while `From` stays this subscriber (RFC 3261 §10.3). This is the
+    /// shape an application server uses for third-party registration.
+    pub fn as_third_party(&mut self, target: impl Into<String>) {
+        self.to_identity = Some(target.into());
+    }
+
+    /// The `To` address-of-record (the profile IMPU unless third-party).
+    pub fn registered_identity(&self) -> &str {
+        self.to_identity
+            .as_deref()
+            .unwrap_or(&self.profile.public_identity)
+    }
+
+    /// The configured P-CSCF candidates, in preference order.
+    pub fn p_cscf_candidates(&self) -> &[String] {
+        &self.profile.p_cscf
+    }
+
+    /// The P-CSCF currently selected.
+    pub fn current_p_cscf(&self) -> Option<&str> {
+        self.profile
+            .p_cscf
+            .get(self.p_cscf_index)
+            .map(String::as_str)
+    }
+
+    /// Advance to the next P-CSCF after a transport failure (RFC 3261 §18.1
+    /// server failover). Returns `None` once every candidate has been tried, so
+    /// the caller can stop rather than looping.
+    pub fn next_p_cscf(&mut self) -> Option<String> {
+        if self.p_cscf_index + 1 >= self.profile.p_cscf.len() {
+            return None;
+        }
+        self.p_cscf_index += 1;
+        self.profile.p_cscf.get(self.p_cscf_index).cloned()
     }
 
     /// Replace the P-CSCF endpoint set, e.g. after P-CSCF re-discovery.
@@ -313,7 +378,7 @@ impl Registration {
         ));
         headers.push(Header::new(
             "To",
-            format!("<{}>", self.profile.public_identity),
+            format!("<{}>", self.registered_identity()),
         ));
         headers.push(Header::new("Call-ID", self.call_id.clone()));
         headers.push(Header::new("CSeq", format!("{} {}", self.cseq, method)));
@@ -341,6 +406,12 @@ impl Registration {
                 self.profile.feature_contact_params()
             ),
         ));
+        // Additional bindings for the same IMPU (RFC 3261 §10.2).
+        for (uri, contact_expires) in &self.extra_contacts {
+            let e = contact_expires.unwrap_or(expires);
+            req.headers
+                .push(Header::new("Contact", format!("<{uri}>;expires={e}")));
+        }
         req.headers
             .push(Header::new("Expires", expires.to_string()));
         for s in &self.profile.security_clients {
@@ -559,5 +630,57 @@ mod tests {
             body: Vec::new(),
         };
         assert_eq!(r.on_registration_notify(&other), None);
+    }
+
+    #[test]
+    fn multiple_contacts_are_all_registered() {
+        let mut reg = Registration::new(ImsProfile::lab_default());
+        reg.add_contact("sip:001010000000001@192.0.2.77:5060", Some(300));
+        let req = reg.register_request();
+        let contacts: Vec<&str> = req.headers.get_all("contact").collect();
+        assert_eq!(contacts.len(), 2);
+        assert!(contacts[0].contains("@192.0.2.10:5060"));
+        assert!(contacts[1].contains("@192.0.2.77:5060"));
+        assert!(contacts[1].contains("expires=300"));
+        assert_eq!(reg.extra_contacts().len(), 1);
+        reg.clear_contacts();
+        assert_eq!(reg.register_request().headers.get_all("contact").count(), 1);
+    }
+
+    #[test]
+    fn third_party_registration_sets_to_to_the_target_impu() {
+        let mut reg = Registration::new(ImsProfile::lab_default());
+        reg.as_third_party("sip:001010000000042@ims.example");
+        assert_eq!(reg.registered_identity(), "sip:001010000000042@ims.example");
+        let req = reg.register_request();
+        // To is the address-of-record being registered; From stays ours.
+        assert_eq!(
+            req.headers.get("to"),
+            Some("<sip:001010000000042@ims.example>")
+        );
+        assert!(req
+            .headers
+            .get("from")
+            .unwrap()
+            .contains("001010000000001@"));
+        // The Request-URI is still the home domain.
+        assert_eq!(req.uri, "sip:ims.mnc001.mcc001.3gppnetwork.org");
+    }
+
+    #[test]
+    fn p_cscf_failover_walks_the_candidate_list() {
+        let mut profile = ImsProfile::lab_default();
+        profile.p_cscf = vec![
+            "pcscf1.example:5060".into(),
+            "pcscf2.example:5060".into(),
+            "pcscf3.example:5060".into(),
+        ];
+        let mut reg = Registration::new(profile);
+        assert_eq!(reg.current_p_cscf(), Some("pcscf1.example:5060"));
+        assert_eq!(reg.next_p_cscf().as_deref(), Some("pcscf2.example:5060"));
+        assert_eq!(reg.next_p_cscf().as_deref(), Some("pcscf3.example:5060"));
+        // Exhausted: no loop back to the start.
+        assert_eq!(reg.next_p_cscf(), None);
+        assert_eq!(reg.p_cscf_candidates().len(), 3);
     }
 }

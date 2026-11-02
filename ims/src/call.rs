@@ -41,6 +41,8 @@ pub enum CallEvent {
     /// The call is established: send the carried ACK. The negotiated answer is
     /// reachable via [`Call::answer`].
     Established { ack: Request },
+    /// A hold/resume re-INVITE was accepted: send the carried ACK.
+    Renegotiated { ack: Request },
     /// A non-2xx final response to INVITE ended the attempt.
     Failed(u16),
     /// A provisional response (e.g. 100 Trying) needed no action.
@@ -59,6 +61,8 @@ pub struct Call {
     state: CallState,
     offer: Option<Sdp>,
     answer: Option<Sdp>,
+    /// CSeq of an outstanding hold/resume re-INVITE, so its ACK matches.
+    pending_reinvite_cseq: Option<u32>,
 }
 
 impl Call {
@@ -86,6 +90,7 @@ impl Call {
             state: CallState::Idle,
             offer: None,
             answer: None,
+            pending_reinvite_cseq: None,
         }
     }
 
@@ -181,6 +186,17 @@ impl Call {
                 if let Some(answer) = self.capture_answer(response) {
                     self.answer = Some(answer);
                 }
+                // A 2xx while Established answers a hold/resume re-INVITE: the
+                // ACK must reuse that re-INVITE's CSeq (RFC 3261 §14.1).
+                if self.state == CallState::Established {
+                    let cseq = self
+                        .pending_reinvite_cseq
+                        .take()
+                        .unwrap_or(self.dialog.invite_cseq);
+                    return CallEvent::Renegotiated {
+                        ack: self.dialog.ack_with_cseq(cseq),
+                    };
+                }
                 let ack = self.dialog.ack();
                 self.state = CallState::Established;
                 return CallEvent::Established { ack };
@@ -203,6 +219,35 @@ impl Call {
         }
         self.state = CallState::Terminated;
         Some(self.dialog.bye())
+    }
+
+    /// Put the remote party on hold by sending a re-INVITE with `a=sendonly`
+    /// (RFC 3261 §14.1, RFC 3264 §6.1).
+    ///
+    /// The call must be [`CallState::Established`]. The 2xx is acknowledged with
+    /// [`CallEvent::Renegotiated`].
+    pub fn hold(&mut self) -> Option<Request> {
+        self.renegotiate_direction(crate::sdp::Direction::SendOnly)
+    }
+
+    /// Resume from hold: re-INVITE with `a=sendrecv`.
+    pub fn resume(&mut self) -> Option<Request> {
+        self.renegotiate_direction(crate::sdp::Direction::SendRecv)
+    }
+
+    fn renegotiate_direction(&mut self, direction: crate::sdp::Direction) -> Option<Request> {
+        if self.state != CallState::Established {
+            return None;
+        }
+        let mut sdp = self.answer.clone().or_else(|| self.offer.clone())?;
+        sdp.set_direction(direction);
+        // Bump o= session version so the peer treats this as a new offer.
+        let version = sdp.origin.session_version.parse::<u64>().unwrap_or(0) + 1;
+        sdp.origin.session_version = version.to_string();
+        let (cseq, request) = self.dialog.reinvite(&sdp.to_text());
+        self.pending_reinvite_cseq = Some(cseq);
+        self.answer = Some(sdp);
+        Some(request)
     }
 
     /// CANCEL an INVITE that has not been answered (RFC 3261 §9).
@@ -471,6 +516,59 @@ mod tests {
             CallEvent::Established { .. }
         ));
         assert!(call.cancel().is_none());
+    }
+
+    #[test]
+    fn hold_sends_a_sendonly_reinvite_and_acks_with_its_own_cseq() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        let ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[("CSeq", "1 INVITE")]),
+            body: Vec::new(),
+        };
+        assert!(matches!(
+            call.on_response(&ok),
+            CallEvent::Established { .. }
+        ));
+
+        let reinvite = call.hold().expect("hold after established");
+        assert_eq!(reinvite.method, Method::Invite);
+        let cseq = reinvite.headers.cseq().unwrap().seq;
+        assert!(cseq > 1, "re-INVITE must use a fresh CSeq");
+        let body = String::from_utf8(reinvite.body.clone()).unwrap();
+        assert!(body.contains("a=sendonly"));
+        // The session version is bumped so the peer treats it as a new offer.
+        assert!(body.contains("o=- 0 1 ") || body.contains("o=- 0 "));
+
+        let ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[("CSeq", &format!("{cseq} INVITE"))]),
+            body: Vec::new(),
+        };
+        match call.on_response(&ok) {
+            CallEvent::Renegotiated { ack } => {
+                assert_eq!(ack.method, Method::Ack);
+                assert_eq!(ack.headers.cseq().unwrap().seq, cseq);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(call.state(), CallState::Established);
+
+        // Resume returns to sendrecv.
+        let resume = call.resume().expect("resume after hold");
+        let body = String::from_utf8(resume.body.clone()).unwrap();
+        assert!(body.contains("a=sendrecv"));
+        assert!(!body.contains("a=sendonly"));
+    }
+
+    #[test]
+    fn hold_is_refused_before_the_call_is_established() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        assert!(call.hold().is_none());
     }
 
     fn resp_headers(pairs: &[(&str, &str)]) -> sip::Headers {

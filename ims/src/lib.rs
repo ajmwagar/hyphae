@@ -20,6 +20,7 @@ pub mod profile;
 pub mod register;
 pub mod sdp;
 pub mod sms;
+pub mod supplementary;
 pub mod uas;
 
 pub use call::{Call, CallEvent, CallState};
@@ -27,6 +28,8 @@ pub use dialog::{Dialog, DialogState};
 pub use emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
 pub use profile::{ImsProfile, SecurityClient};
 pub use register::{Challenge, Registration, RegistrationEvent, RegistrationState};
+pub use sdp::Direction;
 pub use sdp::{Connection, Media, Origin, PrecondDir, Precondition, Sdp};
 pub use sms::{IncomingSms, RpData, SmsDeliver, SmsSender, SmsSubmit};
+pub use supplementary::{accept_waiting, decline_waiting, is_call_waiting, CallWaitingActions};
 pub use uas::{IncomingCall, UasError, UasEvent, UasState};

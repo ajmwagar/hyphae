@@ -1271,3 +1271,224 @@ fn sms_002_mt_deliver_is_decoded_and_acknowledged() {
     assert_eq!(response.body, rp_ack(42));
     assert_eq!(response.body, vec![0x02, 42, 0x00]);
 }
+
+// --- UAS-002: received re-INVITE / UPDATE renegotiation -------------------
+
+fn uas_dialog() -> ims::IncomingCall {
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new(
+        "From",
+        "<sip:001010000000002@ims.example>;tag=caller-tag",
+    ));
+    headers.push(sip::Header::new("To", "<sip:001010000000001@ims.example>"));
+    headers.push(sip::Header::new("Call-ID", "reneg-1"));
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    headers.push(sip::Header::new("Content-Type", "application/sdp"));
+    let offer = ims::Sdp::amr_wb_offer(&[0, 1, 2, 3], true, "192.0.2.20");
+    let invite = sip::Request {
+        method: sip::Method::Invite,
+        uri: "sip:001010000000001@ims.example".into(),
+        headers,
+        body: offer.to_text().into_bytes(),
+    };
+    let mut call = ims::IncomingCall::from_invite(&invite, ims::ImsProfile::lab_default()).unwrap();
+    call.ringing();
+    let _ = call.accept().unwrap();
+    let mut ack_headers = sip::Headers::new();
+    ack_headers.push(sip::Header::new("CSeq", "1 ACK"));
+    let ack = sip::Request {
+        method: sip::Method::Ack,
+        uri: invite.uri.clone(),
+        headers: ack_headers,
+        body: Vec::new(),
+    };
+    let _ = call.on_request(&ack).unwrap();
+    call
+}
+
+#[test]
+fn uas_002_reinvite_and_update_renegotiate_hold() {
+    use ims::{Sdp, UasEvent};
+
+    let mut call = uas_dialog();
+
+    // Remote hold arrives as an offer with a=sendonly; the answer mirrors it.
+    let mut hold = Sdp::amr_wb_offer(&[0, 1, 2, 3], true, "192.0.2.20");
+    hold.set_direction(ims::Direction::SendOnly);
+
+    for method in [sip::Method::Invite, sip::Method::Update] {
+        let mut headers = sip::Headers::new();
+        headers.push(sip::Header::new("CSeq", format!("5 {method}")));
+        headers.push(sip::Header::new("Content-Type", "application/sdp"));
+        let request = sip::Request {
+            method,
+            uri: "sip:001010000000001@ims.example".into(),
+            headers,
+            body: hold.to_text().into_bytes(),
+        };
+        match call.on_request(&request).unwrap() {
+            UasEvent::Respond(r) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.headers.get("content-type"), Some("application/sdp"));
+                let body = String::from_utf8(r.body.clone()).unwrap();
+                // RFC 3264 §6.1: sendonly offer -> recvonly answer.
+                assert!(body.contains("a=recvonly"), "{body}");
+                assert!(!body.contains("a=sendonly"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(
+        call.answer().map(ims::Sdp::direction),
+        Some(ims::Direction::RecvOnly)
+    );
+    // ACK for the re-INVITE keeps the dialog confirmed.
+    let mut ack_headers = sip::Headers::new();
+    ack_headers.push(sip::Header::new("CSeq", "5 ACK"));
+    let ack = sip::Request {
+        method: sip::Method::Ack,
+        uri: "sip:001010000000001@ims.example".into(),
+        headers: ack_headers,
+        body: Vec::new(),
+    };
+    assert_eq!(call.on_request(&ack).unwrap(), UasEvent::Established);
+    assert_eq!(call.state(), ims::UasState::Confirmed);
+}
+
+// --- SUP-001 / SUP-002: hold-resume and call waiting ----------------------
+
+#[test]
+fn sup_001_hold_and_resume_reinvite_directions() {
+    use ims::{Call, CallEvent, Direction, ImsProfile};
+
+    let mut call = Call::new(ImsProfile::lab_default(), "sip:b@ims.example");
+    let _ = call.invite();
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    let ok = sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers,
+        body: Vec::new(),
+    };
+    assert!(matches!(
+        call.on_response(&ok),
+        CallEvent::Established { .. }
+    ));
+
+    // Hold: a re-INVITE with a=sendonly.
+    let hold = call.hold().expect("hold");
+    assert!(String::from_utf8_lossy(&hold.body).contains("a=sendonly"));
+    assert_eq!(
+        call.answer().map(ims::Sdp::direction),
+        Some(Direction::SendOnly)
+    );
+
+    // Resume: a=sendrecv.
+    let resume = call.resume().expect("resume");
+    let body = String::from_utf8_lossy(&resume.body).to_string();
+    assert!(body.contains("a=sendrecv"));
+    assert!(!body.contains("a=sendonly"));
+}
+
+#[test]
+fn sup_002_call_waiting_holds_the_active_call_and_answers() {
+    use ims::{Call, CallEvent, ImsProfile};
+
+    let mut active = Call::new(ImsProfile::lab_default(), "sip:b@ims.example");
+    let _ = active.invite();
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    let ok = sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers,
+        body: Vec::new(),
+    };
+    assert!(matches!(
+        active.on_response(&ok),
+        CallEvent::Established { .. }
+    ));
+    assert!(ims::is_call_waiting(Some(&active)));
+
+    // A second INVITE arrives while the first is established.
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new(
+        "From",
+        "<sip:001010000000003@ims.example>;tag=waiting",
+    ));
+    headers.push(sip::Header::new("To", "<sip:001010000000001@ims.example>"));
+    headers.push(sip::Header::new("Call-ID", "waiting-call"));
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    let offer = ims::Sdp::amr_wb_offer(&[0, 1, 2], true, "192.0.2.30");
+    headers.push(sip::Header::new("Content-Type", "application/sdp"));
+    let invite = sip::Request {
+        method: sip::Method::Invite,
+        uri: "sip:001010000000001@ims.example".into(),
+        headers,
+        body: offer.to_text().into_bytes(),
+    };
+    let mut incoming = ims::IncomingCall::from_invite(&invite, ImsProfile::lab_default()).unwrap();
+
+    let actions = ims::accept_waiting(&mut active, &mut incoming).expect("accept waiting");
+    // The active call is held and the new one is answered.
+    assert!(String::from_utf8_lossy(&actions.hold.body).contains("a=sendonly"));
+    assert_eq!(actions.answer.status, 200);
+}
+
+#[test]
+fn sup_002_declining_a_waiting_call_is_486() {
+    let mut headers = sip::Headers::new();
+    headers.push(sip::Header::new("From", "<sip:c@ims>;tag=w"));
+    headers.push(sip::Header::new("To", "<sip:001010000000001@ims>"));
+    headers.push(sip::Header::new("Call-ID", "decline-1"));
+    headers.push(sip::Header::new("CSeq", "1 INVITE"));
+    let invite = sip::Request {
+        method: sip::Method::Invite,
+        uri: "sip:001010000000001@ims".into(),
+        headers,
+        body: Vec::new(),
+    };
+    let mut incoming =
+        ims::IncomingCall::from_invite(&invite, ims::ImsProfile::lab_default()).unwrap();
+    let response = ims::decline_waiting(&mut incoming);
+    assert_eq!(response.status, 486);
+    assert_eq!(response.reason, "Busy Here");
+}
+
+// --- REG-011..013: registration edge cases --------------------------------
+
+#[test]
+fn reg_011_multiple_contacts_third_party_and_pcscf_failover() {
+    use ims::{ImsProfile, Registration};
+
+    // Multiple bindings for one IMPU in a single REGISTER (RFC 3261 §10.2).
+    let mut reg = Registration::new(ImsProfile::lab_default());
+    reg.add_contact("sip:001010000000001@192.0.2.77:5060", Some(300));
+    let request = reg.register_request();
+    let contacts: Vec<&str> = request.headers.get_all("contact").collect();
+    assert_eq!(contacts.len(), 2);
+    assert!(contacts[1].contains("expires=300"));
+
+    // Third-party registration: To is the address-of-record being registered.
+    let mut reg = Registration::new(ImsProfile::lab_default());
+    reg.as_third_party("sip:001010000000042@ims.example");
+    let request = reg.register_request();
+    assert_eq!(
+        request.headers.get("to"),
+        Some("<sip:001010000000042@ims.example>")
+    );
+    assert!(request
+        .headers
+        .get("from")
+        .unwrap()
+        .contains("001010000000001@"));
+
+    // P-CSCF failover walks the candidate list once, then stops.
+    let mut profile = ImsProfile::lab_default();
+    profile.p_cscf = vec!["pcscf1:5060".into(), "pcscf2:5060".into()];
+    let mut reg = Registration::new(profile);
+    assert_eq!(reg.current_p_cscf(), Some("pcscf1:5060"));
+    assert_eq!(reg.next_p_cscf().as_deref(), Some("pcscf2:5060"));
+    assert_eq!(reg.next_p_cscf(), None);
+}
