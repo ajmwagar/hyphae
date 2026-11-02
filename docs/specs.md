@@ -80,17 +80,16 @@ module. "TODO" rows are deliberately not claimed as implemented.
 * **Modeled backends.** `TRN-001` (modem IMS PDN, `transport::modem`) covers the
   *contract* — modem-assigned PDN addressing — while the AT/QMI byte-level I/O
   remains a documented stub pending a modem device. `TRN-003` (MBIM,
-  `transport::mbim`)
-  models the control-frame wire shape and the modem-assigned IMS PDN session;
-  `TRN-002` (CCCI, `transport::ccci`) ships only the vendor *boundary* — a
-  `VendorChannel` trait plus this tree's own length framing — because CCCI is a
-  vendor interface with no public spec, so no vendor header or device code can
-  enter the tree. `EVS-001` is implemented as
-  the TS 26.445 appendix A *Header-Full* RTP payload format only (no speech
-  codec); see the media-path note below.
+  `transport::mbim`) models the control-frame wire shape and the modem-assigned
+  IMS PDN session. `TRN-002` (CCCI, `transport::ccci`) ships only the vendor
+  *boundary* — a `VendorChannel` trait plus this tree's own length framing —
+  because CCCI is a vendor interface with no public spec, so no vendor header
+  or device code can enter the tree. `EVS-001` is implemented as the TS 26.445
+  appendix A *Header-Full* RTP payload format only (no speech codec); see the
+  media-path note below.
 * **Media path.** The `media` crate frames RTP/RTCP and buffers playout. It
-  wraps the [`codec-amr`] payload (RFC 4867 §9) but never decodes speech, so it
+  wraps the `codec-amr` payload (RFC 4867 §9) but never decodes speech, so it
   stays royalty-free; the AMR-WB/EVS codec itself is still the separate
-  feature-gated package. The [`evs`] payload format is likewise packet layout
-  only. Real network I/O is [`transport`]; `media` is socket-free and tested
-  over in-memory packets.
+  feature-gated package. The `evs` payload format is likewise packet layout
+  only. Real network I/O is `transport`; `media` is socket-free and tested over
+  in-memory packets.

@@ -9,7 +9,9 @@ translated, or reconstructed from a vendor binary.
 | Area | Documents |
 |---|---|
 | SIP | RFC 3261 (core), RFC 3262 (100rel/PRACK), RFC 3264 (offer/answer), RFC 3265/6665 (events), RFC 3311 (UPDATE), RFC 3329 (Security-Client/Verify), RFC 3608 (Service-Route), RFC 2617/3310 (Digest/AKA), RFC 4566 (SDP), RFC 4867 (AMR/AMR-WB RTP payload), RFC 3550 (RTP/RTCP), RFC 4303 (ESP) |
-| IMS / 3GPP | TS 23.003 (identities, APN, IMS domain), TS 23.228 (IMS architecture), TS 24.229 (SIP/IMS call control), TS 26.114 (MTSI media), TS 33.102 (3G security), TS 33.203 (IMS security/AKA), TS 35.205/35.206 (Milenage), TS 35.208 (Milenage test data), TS 24.341 (SMS over IMS), TS 24.301 (EPS NAS/PCO) |
+| IPsec | RFC 4303 (ESP), RFC 2403 (HMAC-MD5-96), RFC 2404 (HMAC-SHA-1-96), RFC 2104 (HMAC), RFC 3174 (SHA-1), RFC 3329 (Security-Client/Server), 3GPP TS 33.203 §7 (Gm security) |
+| Emergency | RFC 5031 (service URN), RFC 4119 / RFC 5491 (PIDF-LO), RFC 6442 (Geolocation), RFC 4412 (Resource-Priority) |
+| IMS / 3GPP | TS 23.003 (identities, APN, IMS domain), TS 23.228 (IMS architecture), TS 24.229 (SIP/IMS call control), TS 24.604 (communication diversion/call waiting), TS 26.114 (MTSI media), TS 26.445 (EVS codec and RTP payload), TS 31.102 (USIM AUTHENTICATE), TS 33.102 (3G security), TS 33.203 (IMS security/AKA), TS 35.205/35.206 (Milenage), TS 35.208 (Milenage test data), TS 24.011 (RP layer), TS 24.341 (SMS over IMS), TS 24.301 (EPS NAS/PCO) |
 | GSMA | IR.92 (VoLTE/MMTel), IR.94 (video share/IR.92 extension) |
 | Codec | RFC 6716 (Opus), RFC 4867 (AMR/AMR-WB RTP), FIPS-197 (AES) |
 
