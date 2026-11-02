@@ -120,3 +120,139 @@ fn the_ike_exchange_completes_over_udp() {
 
     server.join().unwrap();
 }
+
+/// The same exchange, but with every IKE_AUTH datagram encapsulated on the
+/// NAT-T port with the 4-octet non-ESP marker (RFC 3948 §2.2).
+///
+/// Two sockets stand in for ports 500 and 4500; the point is the framing and
+/// the responder accepting IKE from either, not the port numbers.
+#[test]
+fn the_ike_exchange_completes_with_udp_encapsulation() {
+    use epdg::natt::{decapsulate, encapsulate};
+
+    let plain = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let natted = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for socket in [&plain, &natted] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+    let plain_addr = plain.local_addr().unwrap();
+    let natted_addr = natted.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let mut responder = StandInEpdg::new(
+            TEST_NETWORK,
+            TEST_K,
+            TEST_OPC,
+            GROUP,
+            vec![0x55; 32],
+            [0x44; 8],
+            vec![0x66; 32],
+            [0x00, 0x00, 0x10, 0x00],
+            [10, 32, 0, 7],
+            [10, 32, 0, 1],
+        );
+        let mut buf = [0u8; 4096];
+        let mut idle = 0u32;
+        loop {
+            // Try the plain port, then the NAT-T port.
+            let (len, from, encapsulated) = match plain.recv_from(&mut buf) {
+                Ok((len, from)) => (len, from, false),
+                Err(_) => match natted.recv_from(&mut buf) {
+                    Ok((len, from)) => (len, from, true),
+                    Err(_) => {
+                        idle += 1;
+                        if idle >= 50 {
+                            return; // ~5 s of silence
+                        }
+                        continue;
+                    }
+                },
+            };
+            idle = 0;
+            let request = if encapsulated {
+                decapsulate(&buf[..len]).expect("marker").to_vec()
+            } else {
+                buf[..len].to_vec()
+            };
+            let header = epdg::ikev2::Header::decode(&request).unwrap().0;
+            let reply = if header.exchange == epdg::ikev2::ExchangeType::IkeSaInit {
+                responder.on_sa_init(&request).map(Reply::Send)
+            } else {
+                responder.on_ike_auth(&request, &iv_for(header.message_id))
+            };
+            let socket = if encapsulated { &natted } else { &plain };
+            let send = |bytes: Vec<u8>| {
+                let bytes = if encapsulated {
+                    encapsulate(&bytes)
+                } else {
+                    bytes
+                };
+                socket.send_to(&bytes, from).unwrap();
+            };
+            match reply {
+                Ok(Reply::Send(bytes)) => send(bytes),
+                Ok(Reply::Established { bytes, .. }) => {
+                    send(bytes);
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client_socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut client = UeClient::new(
+        TEST_NETWORK,
+        TEST_IDENTITY,
+        TEST_K,
+        TEST_OPC,
+        [0x11; 8],
+        &[0x22; 32],
+        vec![0x33; 32],
+        GROUP,
+        [0x00, 0x00, 0x10, 0x01],
+    )
+    .unwrap();
+
+    let mut buf = [0u8; 4096];
+    client_socket
+        .send_to(&client.sa_init_request(), plain_addr)
+        .unwrap();
+    let (len, _) = client_socket.recv_from(&mut buf).unwrap();
+    let first_auth = client.on_sa_init_response(&buf[..len]).unwrap();
+
+    let mut outbound = Some(first_auth);
+    let mut established = None;
+    while let Some(request) = outbound.take() {
+        client_socket
+            .send_to(&encapsulate(&request), natted_addr)
+            .unwrap();
+        // Patient receive: the responder polls two sockets, so a datagram can
+        // arrive after the first short timeout.
+        let mut waited = Duration::ZERO;
+        let len = loop {
+            match client_socket.recv_from(&mut buf) {
+                Ok((len, _)) => break len,
+                Err(_) if waited < Duration::from_secs(10) => {
+                    waited += Duration::from_millis(200);
+                }
+                Err(e) => panic!("no reply on the NAT-T port: {e}"),
+            }
+        };
+        let reply = decapsulate(&buf[..len]).expect("marker on the NAT-T port");
+        let (next, done) = client.on_ike_auth(reply).unwrap();
+        outbound = next;
+        if done.is_some() {
+            established = done;
+        }
+    }
+
+    let established = established.expect("the exchange completed");
+    assert_eq!(established.ims_address, Some([10, 32, 0, 7]));
+    server.join().unwrap();
+}

@@ -50,6 +50,37 @@ pub fn nat_detection_hash(spi_i: [u8; 8], spi_r: [u8; 8], address: &[u8], port: 
     hasher.finalize().into()
 }
 
+/// One end of the UDP path, as the NAT-detection digest needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// Raw address octets: 4 for IPv4, 16 for IPv6.
+    pub address: Vec<u8>,
+    pub port: u16,
+}
+
+impl Endpoint {
+    /// An IPv4 endpoint.
+    pub fn v4(address: [u8; 4], port: u16) -> Self {
+        Self {
+            address: address.to_vec(),
+            port,
+        }
+    }
+
+    /// An endpoint from raw address octets.
+    pub fn new(address: impl Into<Vec<u8>>, port: u16) -> Self {
+        Self {
+            address: address.into(),
+            port,
+        }
+    }
+
+    /// Address and port as the digest functions want them.
+    pub fn parts(&self) -> (&[u8], u16) {
+        (&self.address, self.port)
+    }
+}
+
 /// What the detection notifies say about the path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NatVerdict {

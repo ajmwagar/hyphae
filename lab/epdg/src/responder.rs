@@ -25,11 +25,12 @@ use epdg::eap::{
     SUBTYPE_CHALLENGE,
 };
 use epdg::ikev2::{
-    ExchangeType, Header, Id, Message, Payload, PayloadType, Proposal, Sa, Selector,
+    ExchangeType, Header, Id, Message, Notify, Payload, PayloadType, Proposal, Sa, Selector,
     TrafficSelectors, Transform, FLAG_RESPONSE, ID_RFC822_ADDR, PROTO_ESP, TRANSFORM_ENCR,
     TRANSFORM_INTEG,
 };
 use epdg::keys::{derive_keys, skeyseed, IkeKeySizes, IkeKeys};
+use epdg::natt::{Endpoint, NatVerdict};
 use epdg::sa::sa_init_response;
 use epdg::sk::{Sk, SkError, BLOCK_LEN};
 
@@ -130,6 +131,8 @@ pub struct StandInEpdg {
     eap: Option<aka::eap_aka_prime::EapAkaPrimeKeys>,
     expected_res: Option<Vec<u8>>,
     step: Step,
+    endpoints: Option<(Endpoint, Endpoint)>,
+    nat: Option<NatVerdict>,
 }
 
 impl StandInEpdg {
@@ -171,6 +174,8 @@ impl StandInEpdg {
             eap: None,
             expected_res: None,
             step: Step::AwaitingAuth,
+            endpoints: None,
+            nat: None,
         }
     }
 
@@ -181,6 +186,10 @@ impl StandInEpdg {
     }
 
     /// Handle IKE_SA_INIT and answer with SAr1/KEr/Nr.
+    ///
+    /// When endpoints have been set with [`Self::with_endpoints`], the two
+    /// NAT-detection notifies are added to the response and the request's own
+    /// notifies are evaluated (RFC 7296 §2.23).
     pub fn on_sa_init(&mut self, request: &[u8]) -> Result<Vec<u8>, ResponderError> {
         let request = Message::decode(request).map_err(decode_error)?;
         self.initiator_spi_value = request.header.initiator_spi;
@@ -225,9 +234,39 @@ impl StandInEpdg {
         ));
         self.nonce_i = Some(nonce_i);
 
+        let mut response = response;
+        if let Some((local, peer)) = self.endpoints.clone() {
+            let notifies =
+                crate::responder::nat_notifies(self.responder_spi, &request, &local, &peer);
+            for notify in notifies {
+                response.payloads.push(Payload {
+                    kind: PayloadType::Notify,
+                    critical: false,
+                    body: notify.encode(),
+                });
+            }
+            self.nat = Some(evaluate_peer_nat(
+                &request,
+                self.responder_spi,
+                &local,
+                &peer,
+            ));
+        }
+
         let bytes = response.encode();
         self.real_message2 = Some(bytes.clone());
         Ok(bytes)
+    }
+
+    /// Enable NAT detection for this responder.
+    pub fn with_endpoints(mut self, local: Endpoint, peer: Endpoint) -> Self {
+        self.endpoints = Some((local, peer));
+        self
+    }
+
+    /// What the peer's notifies said about the path.
+    pub fn nat_verdict(&self) -> Option<NatVerdict> {
+        self.nat
     }
 
     fn sk_out(&self) -> Result<Sk, ResponderError> {
@@ -590,6 +629,56 @@ impl StandInEpdg {
             .clone()
             .ok_or(ResponderError::OutOfOrder("no EAP keys yet"))
     }
+}
+
+/// The two NAT-detection notifies the responder puts in IKE_SA_INIT.
+fn nat_notifies(
+    responder_spi: [u8; 8],
+    request: &Message,
+    local: &Endpoint,
+    peer: &Endpoint,
+) -> [Notify; 2] {
+    epdg::natt::nat_detection_notifies(
+        request.header.initiator_spi,
+        responder_spi,
+        local.parts(),
+        peer.parts(),
+    )
+}
+
+/// Compare the initiator's notifies with what we actually observed.
+fn evaluate_peer_nat(
+    request: &Message,
+    responder_spi: [u8; 8],
+    local: &Endpoint,
+    peer: &Endpoint,
+) -> NatVerdict {
+    let mut source_hashes: Vec<[u8; 20]> = Vec::new();
+    let mut destination_hash: Option<[u8; 20]> = None;
+    for payload in request
+        .payloads
+        .iter()
+        .filter(|p| p.kind == PayloadType::Notify)
+    {
+        let Ok(notify) = Notify::decode(&payload.body) else {
+            continue;
+        };
+        let Ok(hash) = <[u8; 20]>::try_from(notify.data.as_slice()) else {
+            continue;
+        };
+        match notify.notify_type {
+            epdg::natt::NAT_DETECTION_SOURCE_IP => source_hashes.push(hash),
+            epdg::natt::NAT_DETECTION_DESTINATION_IP => destination_hash = Some(hash),
+            _ => {}
+        }
+    }
+    let detector = epdg::natt::NatDetector::new(request.header.initiator_spi, responder_spi);
+    detector.evaluate(
+        &source_hashes,
+        destination_hash.as_ref(),
+        peer.parts(),
+        local.parts(),
+    )
 }
 
 fn selector(start: [u8; 4], end: [u8; 4]) -> TrafficSelectors {

@@ -14,6 +14,7 @@ use epdg::eap::{AkaPrimePeer, EapPacket, EAP_REQUEST};
 use epdg::ike_auth::{AuthError, AuthStep, IkeAuthInitiator};
 use epdg::ikev2::{Message, PayloadType};
 use epdg::keys::IkeKeySizes;
+use epdg::natt::{Endpoint, NatVerdict};
 use epdg::sa::{SaError, SaInitInitiator};
 use epdg::sk::BLOCK_LEN;
 use epdg::ChildSa;
@@ -162,6 +163,31 @@ impl UeClient {
             private_exponent: private_exponent.to_vec(),
             group,
         })
+    }
+
+    /// Enable NAT detection with these endpoints (RFC 7296 §2.23).
+    ///
+    /// Must be called before [`Self::sa_init_request`]: the notifies go in the
+    /// first message.
+    pub fn set_endpoints(&mut self, local: Endpoint, peer: Endpoint) {
+        self.sa = std::mem::replace(
+            &mut self.sa,
+            SaInitInitiator::new([0; 8], &[1; 32], vec![0; 32], 14).unwrap(),
+        )
+        .with_endpoints(local, peer);
+    }
+
+    /// What NAT detection concluded, once the responder has answered.
+    pub fn nat_verdict(&self) -> Option<NatVerdict> {
+        self.sa.nat_verdict()
+    }
+
+    /// Whether the rest of the exchange must be UDP-encapsulated on port 4500.
+    pub fn needs_encapsulation(&self) -> bool {
+        self.sa
+            .nat_verdict()
+            .map(|v| v.needs_encapsulation())
+            .unwrap_or(false)
     }
 
     /// The IKE_SA_INIT request.
