@@ -155,6 +155,7 @@ fn udp_register_with_usim_derived_res() {
             nc,
             cnonce,
             qop,
+            entity_body: None,
         });
         assert_eq!(got, expected, "the client's AKA digest did not verify");
 
