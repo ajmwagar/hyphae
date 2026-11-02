@@ -1,0 +1,12 @@
+[package]
+name = "emergency-lab"
+description = "Stand-in E-CSCF for exercising the emergency IMS flow on loopback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ims = { workspace = true }
+sip = { workspace = true }
