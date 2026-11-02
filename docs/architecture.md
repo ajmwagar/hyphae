@@ -205,6 +205,15 @@ Wi-Fi calling, `3GPP-E-UTRAN-*` with `utran-cell-id-3gpp` for cellular.
 Not implemented yet: the PC/SC adapter that would put a real USIM behind the
 same driver.
 
+### Deliberately deferred
+
+`docs/adr/` records the decisions *not* taken, with the trigger that would
+reopen each. `ADR 0002` defers GBA (TS 33.220) for carrier entitlement: it is
+the specified way to authenticate to an operator application with the SIM, but
+entitlement itself is carrier business logic with no normative request shape, so
+it cannot be spec-derived — only the bootstrapping primitive can. It is not
+claimed by any matrix row.
+
 ### Cryptographic primitives
 
 No primitive is implemented in this tree. AES, SHA-1, SHA-256, HMAC and
