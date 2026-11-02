@@ -211,8 +211,12 @@ same driver.
 reopen each. `ADR 0002` defers GBA (TS 33.220) for carrier entitlement: it is
 the specified way to authenticate to an operator application with the SIM, but
 entitlement itself is carrier business logic with no normative request shape, so
-it cannot be spec-derived — only the bootstrapping primitive can. It is not
-claimed by any matrix row.
+it cannot be spec-derived — only the bootstrapping primitive can.
+
+Following that ADR, the `gba` crate implements the network-free half — BSF
+discovery names (GBA-001) and the NAF key derivation (GBA-002). Nothing in it
+reaches the network. The Ub/Ua exchanges stay deferred as GBA-003, because they
+are HTTP over TLS and no HTTP client belongs in a protocol crate.
 
 ### Cryptographic primitives
 

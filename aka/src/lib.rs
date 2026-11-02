@@ -9,9 +9,12 @@
 #![forbid(unsafe_code)]
 
 mod aes;
+pub mod digest;
 pub mod eap_aka_prime;
+pub mod kdf;
 
 pub use aes::{decrypt_block, encrypt_block};
+pub use digest::{digest_response, DigestInput};
 
 /// 128-bit subscriber key K.
 pub type Key = [u8; 16];

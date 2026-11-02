@@ -1,6 +1,7 @@
 # ADR: GBA (TS 33.220) for carrier entitlement — deferred
 
-**Status:** deferred · **Scope:** any carrier-facing provisioning or entitlement
+**Status:** protocol half implemented (`gba` crate, GBA-001/002); Ub/Ua
+deferred (GBA-003) · **Scope:** any carrier-facing provisioning or entitlement
 step that sits *outside* the 3GPP ePDG/IMS protocols.
 
 ## Context

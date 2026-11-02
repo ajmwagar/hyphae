@@ -7,6 +7,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod plmn;
+
+pub use plmn::{PlmnError, PlmnId};
+
 use std::collections::BTreeMap;
 use std::path::Path;
 

@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 aka.workspace = true
+carrier.workspace = true
 num-bigint = "0.4"
 subtle.workspace = true
 sha1.workspace = true

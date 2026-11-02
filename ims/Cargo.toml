@@ -10,7 +10,6 @@ rust-version.workspace = true
 sip.workspace = true
 aka.workspace = true
 carrier.workspace = true
-md5 = "0.7"
 
 [dev-dependencies]
 transport = { path = "../transport" }

@@ -2880,3 +2880,71 @@ fn epdg_020_nat_traversal_detects_and_encapsulates() {
     assert!(is_nat_keepalive(&NAT_KEEPALIVE));
     assert_eq!(decapsulate(&NAT_KEEPALIVE), None);
 }
+
+// --- GBA-001: BSF discovery ---------------------------------------------
+
+#[test]
+fn gba_001_bsf_discovery_matches_the_specification_examples() {
+    use gba::{bsf_fqdn, bsf_fqdn_for_impi, PlmnId};
+
+    // TS 23.003 §16.2 Example 1: IMSI 234150999999999 (MCC 234, MNC 15).
+    let plmn = PlmnId::new("234", "15").unwrap();
+    assert_eq!(bsf_fqdn(&plmn), "bsf.mnc015.mcc234.pub.3gppnetwork.org");
+
+    // Example 2: the IMPI domain is delegated under 3gppnetwork.org, so `pub`
+    // is inserted before the last two labels rather than appended.
+    assert_eq!(
+        bsf_fqdn_for_impi("234150999999999@ims.mnc015.mcc234.3gppnetwork.org").unwrap(),
+        "bsf.ims.mnc015.mcc234.pub.3gppnetwork.org"
+    );
+
+    // Example 3: a domain outside 3gppnetwork.org is simply prefixed.
+    assert_eq!(
+        bsf_fqdn_for_impi("user@operator.com").unwrap(),
+        "bsf.operator.com"
+    );
+}
+
+// --- GBA-002: NAF key derivation ----------------------------------------
+
+#[test]
+fn gba_002_ks_naf_matches_the_annex_b3_derivation() {
+    use gba::{ks_ext_naf, ks_int_naf, ks_naf, naf_kdf_input, LABEL_GBA_U};
+
+    let ks: [u8; 32] = core::array::from_fn(|i| i as u8);
+    let rand: [u8; 16] = core::array::from_fn(|i| 0x20 + i as u8);
+    let impi = "234150999999999@ims.mnc015.mcc234.3gppnetwork.org";
+    // NAF_Id = FQDN || Ua security protocol identifier (4 octets).
+    let naf_id = b"ims.mnc015.mcc234.3gppnetwork.org\x01\x00\x00\x00";
+
+    // TS 33.220 Annex B.3 fixes the layout: FC=0x01, P0="gba-me", then RAND,
+    // IMPI and NAF_Id, each followed by its two-octet length.
+    let s = naf_kdf_input(&rand, impi, naf_id, gba::LABEL_GBA_ME).unwrap();
+    assert_eq!(s[0], 0x01);
+    assert_eq!(&s[1..7], b"gba-me");
+    assert_eq!(&s[7..9], &[0x00, 0x06]);
+    assert_eq!(&s[9..25], &rand);
+    assert_eq!(&s[25..27], &[0x00, 0x10]);
+    assert_eq!(s.len(), 1 + 8 + 18 + 51 + 39);
+
+    let hex = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
+
+    // Pinned output: HMAC-SHA-256 over the S above, recomputed independently
+    // with OpenSSL from the same Annex B.3 input.
+    assert_eq!(
+        hex(&ks_naf(&ks, &rand, impi, naf_id).unwrap()),
+        "d2ba484fda4e9bb89b60d2227e8b0565ec22b4f23ae8faff001ad57120ef7714"
+    );
+
+    // GBA_U: Ks_ext_NAF keeps the "gba-me" label, Ks_int_NAF switches to
+    // "gba-u" (Annex B.3), so the two must differ.
+    assert_eq!(
+        ks_ext_naf(&ks, &rand, impi, naf_id).unwrap(),
+        ks_naf(&ks, &rand, impi, naf_id).unwrap()
+    );
+    assert_ne!(
+        ks_int_naf(&ks, &rand, impi, naf_id).unwrap(),
+        ks_naf(&ks, &rand, impi, naf_id).unwrap()
+    );
+    assert_eq!(LABEL_GBA_U, b"gba-u");
+}
