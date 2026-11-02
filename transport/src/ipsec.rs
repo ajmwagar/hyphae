@@ -463,6 +463,123 @@ mod tests {
         assert!(rendered[3].contains("sport 5064 dport 5062"));
     }
 
+    fn tunnel() -> S2bTunnel {
+        S2bTunnel {
+            interface: "ipsec0".into(),
+            if_id: 7,
+            local_addr: "192.0.2.10".into(),
+            remote_addr: "192.0.2.1".into(),
+            inbound: TunnelSa {
+                spi: 0x1001,
+                encryption: TunnelEncryption::AesCbc {
+                    key: vec![0xa1; 16],
+                },
+                integrity: TunnelIntegrity::HmacSha256_128 {
+                    key: vec![0xb2; 32],
+                },
+            },
+            outbound: TunnelSa {
+                spi: 0x1000,
+                encryption: TunnelEncryption::AesCbc {
+                    key: vec![0xc3; 16],
+                },
+                integrity: TunnelIntegrity::HmacSha256_128 {
+                    key: vec![0xd4; 32],
+                },
+            },
+            local_ts: "10.1.2.3/32".into(),
+            remote_ts: "10.1.0.0/16".into(),
+        }
+    }
+
+    #[test]
+    fn tunnel_creates_an_interface_bound_by_if_id() {
+        let rendered = TunnelProgram::build(&tunnel()).render();
+        assert_eq!(rendered[0], "ip link add ipsec0 type xfrm if_id 7");
+        assert_eq!(rendered[1], "ip link set ipsec0 mtu 1400 up");
+    }
+
+    #[test]
+    fn tunnel_states_are_tunnel_mode_and_if_id_bound() {
+        let rendered = TunnelProgram::build(&tunnel()).render();
+        let out = &rendered[2];
+        assert!(
+            out.starts_with("ip xfrm state add src 192.0.2.10 dst 192.0.2.1 proto esp spi 0x1000")
+        );
+        assert!(out.contains("mode tunnel"));
+        assert!(out.contains("if_id 7"));
+        // The encryption key is the outbound one, rendered as hex.
+        assert!(out.contains(&format!("enc cbc(aes) 0x{}", "c3".repeat(16))));
+        assert!(
+            out.contains(&format!(
+                "auth-trunc hmac(sha256) 0x{} 128",
+                "d4".repeat(32)
+            )),
+            "{out}"
+        );
+        let inbound = &rendered[3];
+        assert!(inbound
+            .starts_with("ip xfrm state add src 192.0.2.1 dst 192.0.2.10 proto esp spi 0x1001"));
+        assert!(inbound.contains(&format!("enc cbc(aes) 0x{}", "a1".repeat(16))));
+    }
+
+    #[test]
+    fn tunnel_policies_key_on_traffic_selectors_not_ports() {
+        let rendered = TunnelProgram::build(&tunnel()).render();
+        let out = &rendered[4];
+        assert!(out.contains("policy add dir out"));
+        assert!(out.contains("src 10.1.2.3/32 dst 10.1.0.0/16"));
+        assert!(
+            out.contains("tmpl src 192.0.2.10 dst 192.0.2.1 proto esp mode tunnel reqid 7 if_id 7")
+        );
+        // The interface is selected by if_id, not by `dev`.
+        assert!(!out.contains("dev ipsec0"));
+        // No UDP ports: this is not the Gm transport-mode profile.
+        assert!(!out.contains("sport"));
+
+        let inbound = &rendered[5];
+        assert!(inbound.contains("policy add dir in"));
+        assert!(inbound.contains("src 10.1.0.0/16 dst 10.1.2.3/32"));
+        assert!(inbound.contains("tmpl src 192.0.2.1 dst 192.0.2.10"));
+    }
+
+    #[test]
+    fn tunnel_routes_the_far_selectors_over_the_interface() {
+        let rendered = TunnelProgram::build(&tunnel()).render();
+        assert_eq!(rendered[6], "ip addr add 10.1.2.3/32 dev ipsec0");
+        assert_eq!(rendered[7], "ip route add 10.1.0.0/16 dev ipsec0");
+        assert_eq!(rendered.len(), 8);
+    }
+
+    #[test]
+    fn teardown_reverses_every_step() {
+        let build = TunnelProgram::build(&tunnel());
+        let teardown = TunnelProgram::teardown(&tunnel());
+        // Teardown mirrors build except for `link set up`, which has no undo.
+        assert_eq!(build.commands().len(), teardown.commands().len() + 1);
+        let rendered = teardown.render();
+        assert_eq!(rendered[0], "ip route del 10.1.0.0/16 dev ipsec0");
+        assert_eq!(rendered[1], "ip addr del 10.1.2.3/32 dev ipsec0");
+        assert!(rendered.iter().any(|c| c.contains("policy delete dir out")));
+        assert!(rendered.iter().any(|c| c.contains("policy delete dir in")));
+        assert!(
+            rendered
+                .iter()
+                .any(|c| c
+                    == "ip xfrm state delete src 192.0.2.10 dst 192.0.2.1 proto esp spi 0x1000")
+        );
+        assert_eq!(rendered.last().unwrap(), "ip link delete ipsec0");
+    }
+
+    #[test]
+    fn tunnel_apply_is_platform_gated() {
+        let program = TunnelProgram::build(&tunnel());
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(program.apply(), Err(IpsecError::PlatformUnsupported));
+        #[cfg(target_os = "linux")]
+        let _ = program.apply(); // needs CAP_NET_ADMIN; not asserted here
+    }
+
     #[test]
     fn apply_is_platform_gated() {
         let program = XfrmProgram::build(&agreement());
@@ -470,5 +587,342 @@ mod tests {
         assert_eq!(program.apply(), Err(IpsecError::PlatformUnsupported));
         #[cfg(target_os = "linux")]
         let _ = program.apply(); // needs CAP_NET_ADMIN; not asserted here
+    }
+}
+
+// --- S2b: the Wi-Fi calling tunnel (EPDG-010) ----------------------------
+//
+// Gm IPsec above is *transport* mode: it protects a pair of UDP ports and
+// nothing else. The ePDG tunnel is *tunnel* mode: it carries every packet the
+// traffic selectors match, and it is bound to a kernel XFRM interface so the
+// IMS PDN has somewhere to live (RFC 7296 §2.23, TS 23.402 §7.3).
+
+/// The encryption algorithm of one direction of an S2b tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelEncryption {
+    /// AES-CBC (RFC 3602) with a 128/192/256-bit key.
+    AesCbc { key: Vec<u8> },
+}
+
+impl TunnelEncryption {
+    /// The `ip xfrm` name.
+    pub fn xfrm_name(&self) -> &'static str {
+        match self {
+            TunnelEncryption::AesCbc { .. } => "cbc(aes)",
+        }
+    }
+
+    /// The key octets.
+    pub fn key(&self) -> &[u8] {
+        match self {
+            TunnelEncryption::AesCbc { key } => key,
+        }
+    }
+}
+
+/// The integrity algorithm of one direction of an S2b tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelIntegrity {
+    /// HMAC-SHA-256 truncated to 128 bits (RFC 4868).
+    HmacSha256_128 { key: Vec<u8> },
+}
+
+impl TunnelIntegrity {
+    /// The `ip xfrm` name.
+    pub fn xfrm_name(&self) -> &'static str {
+        match self {
+            TunnelIntegrity::HmacSha256_128 { .. } => "hmac(sha256)",
+        }
+    }
+
+    /// The ICV length in bits. This must be passed to the kernel explicitly:
+    /// `ip xfrm ... auth <algo> <key>` silently installs a **96-bit** ICV, so
+    /// an `AUTH_HMAC_SHA2_256_128` SA built that way truncates to the wrong
+    /// length and will not interoperate with an ePDG using the negotiated 128.
+    pub fn icv_bits(&self) -> u16 {
+        match self {
+            TunnelIntegrity::HmacSha256_128 { .. } => 128,
+        }
+    }
+
+    /// The key octets.
+    pub fn key(&self) -> &[u8] {
+        match self {
+            TunnelIntegrity::HmacSha256_128 { key } => key,
+        }
+    }
+}
+
+/// One direction of an S2b tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelSa {
+    /// The SPI stamped on packets in this direction.
+    pub spi: u32,
+    pub encryption: TunnelEncryption,
+    pub integrity: TunnelIntegrity,
+}
+
+/// Everything needed to install an S2b tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S2bTunnel {
+    /// The XFRM interface to create, e.g. `ipsec0`.
+    pub interface: String,
+    /// The XFRM interface id that binds states to the interface.
+    pub if_id: u32,
+    /// The UE's outer (Wi-Fi) address.
+    pub local_addr: String,
+    /// The ePDG's address.
+    pub remote_addr: String,
+    /// ePDG → UE.
+    pub inbound: TunnelSa,
+    /// UE → ePDG.
+    pub outbound: TunnelSa,
+    /// The UE's inner address, as a CIDR: `10.1.2.3/32`.
+    pub local_ts: String,
+    /// The selectors the ePDG narrowed to, as a CIDR: `0.0.0.0/0`.
+    pub remote_ts: String,
+}
+
+impl S2bTunnel {
+    /// A conventional tunnel MTU: 1500 minus the ESP overhead for this
+    /// algorithm pair. AES-CBC needs IV (16) + pad, and HMAC-SHA-256-128 an ICV
+    /// of 16, so 1500 - 20 (IP) - 8 (ESP header+trailer) - 16 (IV) - 16 (ICV)
+    /// ≈ 1400 is the usual value operators use.
+    pub const DEFAULT_MTU: u16 = 1400;
+}
+
+/// Renders `ip` commands that install or remove an [`S2bTunnel`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelProgram {
+    commands: Vec<Vec<String>>,
+}
+
+impl TunnelProgram {
+    /// The commands that create the interface, install both SAs, install both
+    /// policies and route the inner selectors over the interface.
+    pub fn build(tunnel: &S2bTunnel) -> Self {
+        let (local, remote) = (&tunnel.local_addr, &tunnel.remote_addr);
+        let if_id = tunnel.if_id.to_string();
+        let interface = &tunnel.interface;
+        let mut commands = Vec::new();
+
+        // 1. The XFRM interface the IMS PDN is routed over.
+        commands.push(vec![
+            "ip".into(),
+            "link".into(),
+            "add".into(),
+            interface.clone(),
+            "type".into(),
+            "xfrm".into(),
+            "if_id".into(),
+            if_id.clone(),
+        ]);
+        commands.push(vec![
+            "ip".into(),
+            "link".into(),
+            "set".into(),
+            interface.clone(),
+            "mtu".into(),
+            S2bTunnel::DEFAULT_MTU.to_string(),
+            "up".into(),
+        ]);
+
+        // 2. One state per direction. Outbound is keyed by the SPI the
+        //    responder chose, inbound by the one we chose in SAi2.
+        for (src, dst, sa) in [
+            (local, remote, &tunnel.outbound),
+            (remote, local, &tunnel.inbound),
+        ] {
+            commands.push(vec![
+                "ip".into(),
+                "xfrm".into(),
+                "state".into(),
+                "add".into(),
+                "src".into(),
+                src.clone(),
+                "dst".into(),
+                dst.clone(),
+                "proto".into(),
+                "esp".into(),
+                "spi".into(),
+                format!("0x{:x}", sa.spi),
+                "mode".into(),
+                "tunnel".into(),
+                "reqid".into(),
+                if_id.clone(),
+                "if_id".into(),
+                if_id.clone(),
+                "enc".into(),
+                sa.encryption.xfrm_name().into(),
+                format!("0x{}", hex(sa.encryption.key())),
+                // `auth-trunc`, not `auth`: the kernel defaults the ICV to 96
+                // bits otherwise, which is not RFC 4868's 128.
+                "auth-trunc".into(),
+                sa.integrity.xfrm_name().into(),
+                format!("0x{}", hex(sa.integrity.key())),
+                sa.integrity.icv_bits().to_string(),
+            ]);
+        }
+
+        // 3. Policies keyed on the traffic selectors, not on ports.
+        for (dir, ts_src, ts_dst, tmpl_src, tmpl_dst) in [
+            ("out", &tunnel.local_ts, &tunnel.remote_ts, local, remote),
+            ("in", &tunnel.remote_ts, &tunnel.local_ts, remote, local),
+        ] {
+            commands.push(vec![
+                "ip".into(),
+                "xfrm".into(),
+                "policy".into(),
+                "add".into(),
+                "dir".into(),
+                dir.into(),
+                "src".into(),
+                ts_src.clone(),
+                "dst".into(),
+                ts_dst.clone(),
+                // No `dev`: an XFRM interface is selected by `if_id`, and the
+                // template must carry the same `if_id` as the state or the
+                // bundle lookup fails with XfrmOutNoStates.
+                "tmpl".into(),
+                "src".into(),
+                tmpl_src.clone(),
+                "dst".into(),
+                tmpl_dst.clone(),
+                "proto".into(),
+                "esp".into(),
+                "mode".into(),
+                "tunnel".into(),
+                "reqid".into(),
+                if_id.clone(),
+                "if_id".into(),
+                if_id.clone(),
+            ]);
+        }
+
+        // 4. Give the interface the inner address the ePDG assigned.
+        commands.push(vec![
+            "ip".into(),
+            "addr".into(),
+            "add".into(),
+            tunnel.local_ts.clone(),
+            "dev".into(),
+            interface.clone(),
+        ]);
+
+        // 5. Route the far selectors over the interface.
+        commands.push(vec![
+            "ip".into(),
+            "route".into(),
+            "add".into(),
+            tunnel.remote_ts.clone(),
+            "dev".into(),
+            interface.clone(),
+        ]);
+
+        Self { commands }
+    }
+
+    /// The commands that undo [`Self::build`], newest first.
+    pub fn teardown(tunnel: &S2bTunnel) -> Self {
+        let (local, remote) = (&tunnel.local_addr, &tunnel.remote_addr);
+        let interface = &tunnel.interface;
+        let if_id = tunnel.if_id.to_string();
+        let mut commands = vec![
+            vec![
+                "ip".into(),
+                "route".into(),
+                "del".into(),
+                tunnel.remote_ts.clone(),
+                "dev".into(),
+                interface.clone(),
+            ],
+            vec![
+                "ip".into(),
+                "addr".into(),
+                "del".into(),
+                tunnel.local_ts.clone(),
+                "dev".into(),
+                interface.clone(),
+            ],
+        ];
+        for (dir, ts_src, ts_dst) in [
+            ("out", &tunnel.local_ts, &tunnel.remote_ts),
+            ("in", &tunnel.remote_ts, &tunnel.local_ts),
+        ] {
+            commands.push(vec![
+                "ip".into(),
+                "xfrm".into(),
+                "policy".into(),
+                "delete".into(),
+                "dir".into(),
+                dir.into(),
+                "src".into(),
+                ts_src.clone(),
+                "dst".into(),
+                ts_dst.clone(),
+            ]);
+        }
+        for (src, dst, sa) in [
+            (local, remote, &tunnel.outbound),
+            (remote, local, &tunnel.inbound),
+        ] {
+            commands.push(vec![
+                "ip".into(),
+                "xfrm".into(),
+                "state".into(),
+                "delete".into(),
+                "src".into(),
+                src.clone(),
+                "dst".into(),
+                dst.clone(),
+                "proto".into(),
+                "esp".into(),
+                "spi".into(),
+                format!("0x{:x}", sa.spi),
+            ]);
+        }
+        let _ = if_id;
+        commands.push(vec![
+            "ip".into(),
+            "link".into(),
+            "delete".into(),
+            interface.clone(),
+        ]);
+        Self { commands }
+    }
+
+    /// The command vectors (program name first), for inspection or testing.
+    pub fn commands(&self) -> &[Vec<String>] {
+        &self.commands
+    }
+
+    /// Render the commands as shell lines.
+    pub fn render(&self) -> Vec<String> {
+        self.commands.iter().map(|argv| argv.join(" ")).collect()
+    }
+
+    /// Run the commands with `ip`. Linux only; needs `CAP_NET_ADMIN`.
+    #[cfg(target_os = "linux")]
+    pub fn apply(&self) -> Result<(), IpsecError> {
+        for argv in &self.commands {
+            let output = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .output()
+                .map_err(|e| IpsecError::Xfrm(e.to_string()))?;
+            if !output.status.success() {
+                return Err(IpsecError::Xfrm(format!(
+                    "{}: {}",
+                    argv.join(" "),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Kernel tunnel programming is not implemented off Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub fn apply(&self) -> Result<(), IpsecError> {
+        Err(IpsecError::PlatformUnsupported)
     }
 }

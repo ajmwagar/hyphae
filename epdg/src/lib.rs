@@ -11,10 +11,14 @@
 //! * [`eap`] — the EAP packet framing and the EAP-AKA' peer challenge/response,
 //!   using the key hierarchy from `aka::eap_aka_prime`.
 //!
-//! What is **not** here yet: Diffie-Hellman, the SK encryption/integrity layer,
-//! the IKE_SA_INIT/SA_AUTH state machine, and the S2b bearer. Those are the next
-//! slices; this crate deliberately stops at "messages are well-formed and the
-//! challenge verifies".
+//! * [`ike_auth`] — the EAP-only IKE_AUTH exchange (RFC 5998).
+//! * [`child`] — the child SA the exchange negotiates: the S2b bearer's SPIs,
+//!   algorithms, keys and traffic selectors.
+//! * [`cp`] — the Configuration payload that hands the UE its IMS address.
+//!
+//! What is **not** here: sockets (the caller supplies every byte), random
+//! number generation, and the data plane. Programming the tunnel into a kernel
+//! lives in `transport::ipsec`; driving the exchange lives in `lab/epdg`.
 //!
 //! ## Unsafe policy
 //!
@@ -23,6 +27,8 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod child;
+pub mod cp;
 pub mod dh;
 pub mod eap;
 pub mod ike_auth;
@@ -31,6 +37,11 @@ pub mod keys;
 pub mod sa;
 pub mod sk;
 
+pub use auth::{
+    auth_payload, child_keymat, key_pad, signed_octets_initiator, signed_octets_responder,
+};
+pub use child::{ChildDirection, ChildEncryption, ChildError, ChildIntegrity, ChildSa};
+pub use cp::{ConfigAttribute, ConfigPayload};
 pub use eap::{AkaPrimePeer, EapPacket, EapPeerError};
 pub use ike_auth::{AuthError, AuthStep, IkeAuthInitiator};
 pub use ikev2::{ExchangeType, Header, IkeError, Message, Payload, PayloadType};

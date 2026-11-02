@@ -20,11 +20,13 @@
 use crate::auth::{
     auth_payload, child_keymat, constant_time_eq, signed_octets_initiator, signed_octets_responder,
 };
+use crate::child::{ChildError, ChildSa};
+use crate::cp::ConfigPayload;
 use crate::eap::{AkaPrimePeer, EapPacket, EAP_SUCCESS};
 use crate::ikev2::{
-    ExchangeType, Header, Id, IkeError, Notify, Payload, PayloadType, Proposal, Sa, Selector,
-    TrafficSelectors, Transform, FLAG_INITIATOR, FLAG_RESPONSE, ID_RFC822_ADDR, PROTO_ESP,
-    TRANSFORM_ENCR, TRANSFORM_INTEG,
+    ExchangeType, Header, Id, IkeError, Message, Notify, Payload, PayloadType, Proposal, Sa,
+    Selector, TrafficSelectors, Transform, FLAG_INITIATOR, FLAG_RESPONSE, ID_RFC822_ADDR,
+    PROTO_ESP, TRANSFORM_ENCR, TRANSFORM_INTEG,
 };
 use crate::keys::IkeKeys;
 use crate::sk::{Sk, SkError, BLOCK_LEN};
@@ -45,6 +47,8 @@ pub enum AuthError {
     BadResponderAuth,
     /// EAP failed or was rejected.
     EapFailed,
+    /// The child SA could not be built from the responder's answer.
+    Child(ChildError),
     /// The EAP peer rejected the exchange.
     Eap(String),
     /// A message arrived out of order.
@@ -59,6 +63,7 @@ impl core::fmt::Display for AuthError {
             AuthError::Unexpected(what) => write!(f, "unexpected IKE_AUTH content: {what}"),
             AuthError::BadResponderAuth => f.write_str("responder AUTH did not verify"),
             AuthError::EapFailed => f.write_str("EAP authentication failed"),
+            AuthError::Child(e) => write!(f, "child SA: {e}"),
             AuthError::Eap(what) => write!(f, "EAP error: {what}"),
             AuthError::OutOfOrder(what) => write!(f, "IKE_AUTH out of order: {what}"),
         }
@@ -79,6 +84,12 @@ impl From<IkeError> for AuthError {
     }
 }
 
+impl From<ChildError> for AuthError {
+    fn from(e: ChildError) -> Self {
+        AuthError::Child(e)
+    }
+}
+
 impl From<crate::eap::EapPeerError> for AuthError {
     fn from(e: crate::eap::EapPeerError) -> Self {
         AuthError::Eap(e.to_string())
@@ -90,8 +101,14 @@ impl From<crate::eap::EapPeerError> for AuthError {
 pub enum AuthStep {
     /// Send this sealed message and wait for the reply.
     Send(Vec<u8>),
-    /// The tunnel is authenticated; the child SA key material is included.
-    Established { child_keys: Vec<u8> },
+    /// The tunnel is authenticated. The child SA carries the SPIs, algorithms
+    /// and traffic selectors a kernel needs; `config` is the ePDG's CFG_REPLY
+    /// with the IMS address, when the responder sent one.
+    Established {
+        child: ChildSa,
+        config: Option<ConfigPayload>,
+        child_keys: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +183,11 @@ impl IkeAuthInitiator {
                 .encode(),
             },
             Payload {
+                kind: PayloadType::Config,
+                critical: false,
+                body: ConfigPayload::s2b_request().encode(),
+            },
+            Payload {
                 kind: PayloadType::Sa,
                 critical: false,
                 body: self.child_sa_proposal().encode(),
@@ -221,7 +243,9 @@ impl IkeAuthInitiator {
             if parsed.code == EAP_SUCCESS {
                 self.msk = Some(peer.keys().msk.to_vec());
                 self.phase = Phase::AwaitingFinalAuth;
-                // Answer with our AUTH, computed over the EAP MSK.
+                // Every request starts a new exchange, so the counter moves
+                // before the message is sealed, not after (RFC 7296 §2.2).
+                self.message_id += 1;
                 let auth = self.initiator_auth()?;
                 let sealed = self.seal(
                     vec![Payload {
@@ -231,11 +255,11 @@ impl IkeAuthInitiator {
                     }],
                     iv,
                 )?;
-                self.message_id += 1;
                 return Ok(AuthStep::Send(sealed));
             }
             // Otherwise it is an EAP request: answer it.
             let response = peer.on_request(&eap.body)?;
+            self.message_id += 1;
             let sealed = self.seal(
                 vec![Payload {
                     kind: PayloadType::Eap,
@@ -245,7 +269,6 @@ impl IkeAuthInitiator {
                 iv,
             )?;
             self.phase = Phase::AwaitingSuccess;
-            self.message_id += 1;
             return Ok(AuthStep::Send(sealed));
         }
 
@@ -255,12 +278,33 @@ impl IkeAuthInitiator {
                 return Err(AuthError::OutOfOrder("AUTH before EAP success"));
             }
             self.verify_responder_auth(&auth.body)?;
-            let child_keys = child_keymat(&self.keys.sk_d, &self.nonce_i, &self.nonce_r, 64);
+            // 64 octets is enough for AES-256-CBC plus HMAC-SHA-256 in both
+            // directions; the child SA only consumes what it needs.
+            let child_keys = child_keymat(&self.keys.sk_d, &self.nonce_i, &self.nonce_r, 128);
+            let child =
+                ChildSa::from_response(&message, u32::from_be_bytes(self.child_spi), &child_keys)?;
+            let config = message
+                .find(PayloadType::Config)
+                .map(|p| ConfigPayload::decode(&p.body))
+                .transpose()?;
             self.phase = Phase::Done;
-            return Ok(AuthStep::Established { child_keys });
+            return Ok(AuthStep::Established {
+                child,
+                config,
+                child_keys,
+            });
         }
 
         Err(AuthError::Unexpected("neither EAP nor AUTH"))
+    }
+
+    /// Open an inbound message without advancing the exchange.
+    ///
+    /// A caller needs this to inspect a challenge (a USIM has to see RAND
+    /// before it can produce RES), which is why it is separate from
+    /// [`Self::on_response`].
+    pub fn peek(&self, bytes: &[u8]) -> Result<Message, AuthError> {
+        Ok(self.sk_in()?.open(bytes)?)
     }
 
     /// Whether the exchange has completed.
@@ -374,7 +418,7 @@ mod tests {
         AkaPrimePeer, EapPacket, AT_MAC, EAP_REQUEST, EAP_RESPONSE, EAP_SUCCESS,
         EAP_TYPE_AKA_PRIME, SUBTYPE_CHALLENGE,
     };
-    use crate::ikev2::{Payload, PayloadType};
+    use crate::ikev2::{Payload, PayloadType, Transform, TRANSFORM_ENCR, TRANSFORM_INTEG};
     use crate::keys::{derive_keys, skeyseed, IkeKeySizes};
     use aka::eap_aka_prime::{
         at_mac, attribute, ck_ik_prime, derive_keys as eap_keys, kdf_input_attribute, AT_MAC_LEN,
@@ -489,7 +533,12 @@ mod tests {
         let AuthStep::Send(response) = step else {
             panic!("expected an EAP response, got {step:?}");
         };
-        // The response is an EAP-Response/AKA'-Challenge.
+        // The response is a new request, so it carries the next message id.
+        assert_eq!(
+            Header::decode(&response).unwrap().0.message_id,
+            2,
+            "the EAP response must advance the message id"
+        );
         let opened = f.auth.sk_out().unwrap().open(&response).unwrap();
         let eap = EapPacket::parse(&opened.payloads[0].body).unwrap();
         assert_eq!(eap.code, EAP_RESPONSE);
@@ -510,6 +559,11 @@ mod tests {
         let AuthStep::Send(final_auth) = step else {
             panic!("expected AUTH, got {step:?}");
         };
+        assert_eq!(
+            Header::decode(&final_auth).unwrap().0.message_id,
+            3,
+            "AUTH is the third request"
+        );
         let opened = f.auth.sk_out().unwrap().open(&final_auth).unwrap();
         assert_eq!(opened.payloads[0].kind, PayloadType::Auth);
         let our_auth = opened.payloads[0].body.clone();
@@ -547,24 +601,66 @@ mod tests {
                         proposals: vec![Proposal {
                             number: 1,
                             protocol_id: PROTO_ESP,
-                            spi: vec![0xDE, 0xAD, 0xBE, 0xEF],
-                            transforms: vec![],
+                            spi: vec![0x01, 0x02, 0x03, 0x04],
+                            transforms: vec![
+                                Transform {
+                                    transform_type: TRANSFORM_ENCR,
+                                    id: 12,
+                                    attributes: vec![0x80, 0x0E, 0x00, 0x80],
+                                },
+                                Transform {
+                                    transform_type: TRANSFORM_INTEG,
+                                    id: 12,
+                                    attributes: vec![],
+                                },
+                            ],
                         }],
                     }
+                    .encode(),
+                },
+                Payload {
+                    kind: PayloadType::Tsi,
+                    critical: false,
+                    body: any_ipv4().encode(),
+                },
+                Payload {
+                    kind: PayloadType::Tsr,
+                    critical: false,
+                    body: any_ipv4().encode(),
+                },
+                Payload {
+                    kind: PayloadType::Config,
+                    critical: false,
+                    body: crate::cp::ConfigPayload::reply(vec![crate::cp::ConfigAttribute::new(
+                        crate::cp::INTERNAL_IP4_ADDRESS,
+                        [10, 1, 2, 3],
+                    )])
                     .encode(),
                 },
             ],
             &f.iv,
         );
         let step = f.auth.on_response(&msg, &f.iv, &mut f.peer).unwrap();
-        let AuthStep::Established { child_keys } = step else {
+        let AuthStep::Established {
+            child,
+            config,
+            child_keys,
+        } = step
+        else {
             panic!("expected Established, got {step:?}");
         };
-        assert_eq!(child_keys.len(), 64);
+        assert_eq!(child_keys.len(), 128);
         assert_eq!(
             child_keys,
-            child_keymat(&keys.sk_d, &[0x33; 32], &[0x66; 32], 64)
+            child_keymat(&keys.sk_d, &[0x33; 32], &[0x66; 32], 128)
         );
+        // Our SPI came from SAi2, the responder's from SAr2.
+        assert_eq!(child.inbound.spi, 0xDEADBEEF);
+        assert_eq!(child.outbound.spi, 0x01020304);
+        assert_eq!(child.outbound.encryption.key(), &child_keys[0..16]);
+        assert_eq!(child.outbound.integrity.key(), &child_keys[16..48]);
+        let config = config.expect("the ePDG assigned an address");
+        assert_eq!(config.internal_ip4_address(), Some([10, 1, 2, 3]));
         assert!(f.auth.is_established());
     }
 
