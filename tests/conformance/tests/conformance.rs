@@ -254,6 +254,117 @@ fn rtp_001_rfc4867_octet_aligned_round_trip() {
     assert_eq!(parsed.speech_modes(), vec![8]);
 }
 
+// --- EVS-001: TS 26.445 appendix A Header-Full RTP payload ----------------
+
+#[test]
+fn evs_001_cmr_toc_byte_round_trips() {
+    use evs::rtp::{Cmr, ModeSet, Payload};
+    // CMR: H=1, T=2 (WB), D=7 (32 kbit/s) => 0xA7;
+    // ToC: H=0, F=0, FT=7 => 0x07. The EVS Header-Full ToC has no Q/P bits,
+    // so the round-trip is byte-exact.
+    let p = Payload::new(
+        Cmr::new(ModeSet::Wb, 7),
+        vec![evs::rtp::Frame::speech(7, vec![0xA5; 80]).unwrap()],
+    );
+    let bytes = p.to_bytes().unwrap();
+    assert_eq!(&bytes[..2], &[0xA7, 0x07]);
+    assert_eq!(bytes.len(), 2 + 80);
+    assert_eq!(Payload::parse(&bytes).unwrap(), p);
+    // The CMR byte round-trips its T/D fields exactly.
+    assert_eq!(Cmr::parse(bytes[0]).unwrap().to_byte(), 0xA7);
+    // Table A.3: the T/D pair decodes to the right requested rate.
+    assert_eq!(Cmr::new(ModeSet::Wb, 7).bitrate_kbps(), Some(32.0));
+    assert_eq!(Cmr::new(ModeSet::Io, 8).bitrate_kbps(), Some(23.85));
+    assert!(Cmr::no_request().is_no_request());
+}
+
+#[test]
+fn evs_001_frame_table_classification() {
+    use evs::rtp::{classify_ft, Cmr, FrameKind, Payload};
+    // Every defined frame type classifies to its EVS kind.
+    assert_eq!(classify_ft(0), FrameKind::PrimarySpeech { ft: 0 });
+    assert_eq!(classify_ft(12), FrameKind::PrimarySid);
+    assert_eq!(classify_ft(14), FrameKind::Lost);
+    assert_eq!(classify_ft(15), FrameKind::NoData);
+    assert_eq!(classify_ft(16), FrameKind::IoSpeech { mode: 0 });
+    assert_eq!(classify_ft(25), FrameKind::IoSid);
+    assert_eq!(classify_ft(30), FrameKind::Lost);
+    assert_eq!(classify_ft(31), FrameKind::NoData);
+    assert_eq!(classify_ft(13), FrameKind::Reserved { ft: 13 });
+
+    // A mixed payload reports the right kinds end to end.
+    let p = Payload::new(
+        Cmr::no_request(),
+        vec![
+            evs::rtp::Frame::primary_sid(vec![0x11; 6]).unwrap(),
+            evs::rtp::Frame::lost(true),
+            evs::rtp::Frame::no_data(false),
+        ],
+    );
+    let parsed = Payload::parse(&p.to_bytes().unwrap()).unwrap();
+    assert_eq!(parsed.frames[0].kind(), FrameKind::PrimarySid);
+    assert_eq!(parsed.frames[1].kind(), FrameKind::Lost);
+    assert_eq!(parsed.frames[2].kind(), FrameKind::NoData);
+    assert!(!parsed.has_speech());
+}
+
+#[test]
+fn evs_001_primary_speech_frame_sizes() {
+    use evs::rtp::{frame_size, Payload};
+    // Primary speech octet size = kbps * 2.5 for a 20 ms frame.
+    assert_eq!(frame_size(4), Some(33)); // 13.2 kbps
+    assert_eq!(frame_size(10), Some(240)); // 96 kbps
+    assert_eq!(frame_size(11), Some(320)); // 128 kbps (largest EVS frame)
+                                           // AMR-WB IO frames carry the RFC 4867 octet-aligned sizes verbatim.
+    assert_eq!(frame_size(16), Some(17));
+    assert_eq!(frame_size(24), Some(60));
+    // The largest frame serialises and round-trips exactly.
+    let p = Payload::single_speech(11, vec![0xA5; 320]).unwrap();
+    let bytes = p.to_bytes().unwrap();
+    assert_eq!(bytes.len(), 2 + 320);
+    assert_eq!(Payload::parse(&bytes).unwrap(), p);
+}
+
+#[test]
+fn evs_001_multi_frame_round_trips() {
+    use evs::rtp::{Cmr, Frame, ModeSet, Payload};
+    // Primary speech FT=0 (7 bytes), then FT=4 (33 bytes), then AMR-WB IO
+    // mode 0 (FT=16, 17 bytes) in one multi-frame payload.
+    let p = Payload::new(
+        Cmr::new(ModeSet::Io, 0),
+        vec![
+            Frame::speech(0, vec![0xA5; 7]).unwrap(),
+            Frame::speech(4, vec![0xA5; 33]).unwrap(),
+            Frame::speech(16, vec![0xA5; 17]).unwrap(),
+        ],
+    );
+    let bytes = p.to_bytes().unwrap();
+    assert_eq!(bytes[1], 0x40); // F=1, FT=0
+    assert_eq!(bytes[9], 0x44); // F=1, FT=4
+    assert_eq!(bytes[43], 0x10); // F=0, FT=16
+    let parsed = Payload::parse(&bytes).unwrap();
+    assert_eq!(parsed, p);
+    assert_eq!(parsed.speech_frame_types(), vec![0, 4, 16]);
+}
+
+#[test]
+fn evs_001_compact_format_is_rejected() {
+    use evs::rtp::{Payload, PayloadFormat};
+    // Header-Compact, storage and multi-channel are not implemented; they must
+    // error rather than be inferred from a header-full buffer (mirroring how
+    // codec-amr rejects RFC 4867 bandwidth-efficient mode).
+    for format in [
+        PayloadFormat::HeaderCompact,
+        PayloadFormat::Storage,
+        PayloadFormat::MultiChannel,
+    ] {
+        assert_eq!(
+            Payload::parse_mode(&[0xA7, 0x07], format),
+            Err(evs::EvsError::Unsupported)
+        );
+    }
+}
+
 // --- PRACK / dialog -------------------------------------------------------
 
 #[test]

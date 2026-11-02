@@ -13,5 +13,6 @@ ims.workspace = true
 carrier.workspace = true
 codec.workspace = true
 codec-amr.workspace = true
+evs.workspace = true
 media.workspace = true
 transport.workspace = true

@@ -17,9 +17,11 @@ patent grant covering the *contributions to this project*.
 1. **Nothing encumbered ships in the default build.** The core has Opus only.
    AMR-WB is available only through the separate `codec-amr` package with the
    non-default `amr-wb`/`amr-wb-dlopen` features, which link a *system*
-   libopencore-amrwb at the distributor's choice. No AMR-WB/EVS codec
-   implementation is in this source tree, so the default source distribution
-   creates no codec royalty obligation. See `codec-amr/PATENTS.md`.
+   libopencore-amrwb at the distributor's choice. EVS likewise lives in the
+   separate `evs` package, which carries only the TS 26.445 appendix A RTP
+   payload format (no codec). No AMR-WB/EVS codec implementation is in this
+   source tree, so the default source distribution creates no codec royalty
+   obligation. See `codec-amr/PATENTS.md` and `evs/PATENTS.md`.
 2. **Whoever puts a codec on a device pays for it.** Codec licensing attaches to
    devices, not to source code. See
    [docs/adr/0001-codec-licensing.md](docs/adr/0001-codec-licensing.md) for the
