@@ -48,6 +48,9 @@ pub enum CallEvent {
     Forked { ack: Request, bye: Request },
     /// A non-2xx final response to INVITE ended the attempt.
     Failed(u16),
+    /// The failure is a voice-continuity event (EPS fallback / retry), not an
+    /// ordinary rejection. The platform decides whether to use CS.
+    Fallback(crate::continuity::FallbackReason),
     /// A provisional response (e.g. 100 Trying) needed no action.
     Provisional,
 }
@@ -213,6 +216,11 @@ impl Call {
             }
             // Non-2xx to INVITE: the client transaction sends the ACK, not us.
             self.state = CallState::Failed(status);
+            // 488/580 mean the network cannot serve this over IMS: the platform
+            // may fall back to CS. 503 is a retry hint, not a fallback.
+            if let Some(reason) = crate::continuity::classify_invite_failure(response) {
+                return CallEvent::Fallback(reason);
+            }
             return CallEvent::Failed(status);
         }
 
@@ -691,6 +699,41 @@ mod tests {
             call.on_response(&ok),
             CallEvent::Renegotiated { .. }
         ));
+    }
+
+    #[test]
+    fn a_488_on_invite_is_a_cs_fallback_not_a_plain_failure() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        let rejected = Response {
+            status: 488,
+            reason: "Not Acceptable Here".into(),
+            headers: resp_headers(&[("CSeq", "1 INVITE")]),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            call.on_response(&rejected),
+            CallEvent::Fallback(crate::continuity::FallbackReason::EpsFallback)
+        );
+        assert_eq!(call.state(), CallState::Failed(488));
+    }
+
+    #[test]
+    fn a_503_on_invite_is_a_retry_hint() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        let unavailable = Response {
+            status: 503,
+            reason: "Service Unavailable".into(),
+            headers: resp_headers(&[("CSeq", "1 INVITE"), ("Retry-After", "30")]),
+            body: Vec::new(),
+        };
+        assert_eq!(
+            call.on_response(&unavailable),
+            CallEvent::Fallback(crate::continuity::FallbackReason::ServiceNotProvided {
+                retry_after_s: Some(30)
+            })
+        );
     }
 
     fn resp_headers(pairs: &[(&str, &str)]) -> sip::Headers {

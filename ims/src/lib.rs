@@ -14,6 +14,7 @@
 
 pub mod auth;
 pub mod call;
+pub mod continuity;
 pub mod dialog;
 pub mod emergency;
 pub mod keepalive;
@@ -25,6 +26,7 @@ pub mod supplementary;
 pub mod uas;
 
 pub use call::{Call, CallEvent, CallState};
+pub use continuity::{classify_invite_failure, ContinuityEvent, ContinuityMonitor, FallbackReason};
 pub use dialog::{Dialog, DialogState};
 pub use emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
 pub use keepalive::{Keepalive, KeepaliveStatus};
