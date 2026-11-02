@@ -29,6 +29,9 @@ pub struct Dialog {
     pub cseq: u32,
     pub state: DialogState,
     branch_counter: u32,
+    /// The INVITE as it was sent, so CANCEL can reuse its branch, To, From and
+    /// Call-ID verbatim (RFC 3261 §9.1).
+    invite_sent: Option<Request>,
 }
 
 impl Dialog {
@@ -53,6 +56,7 @@ impl Dialog {
             cseq: 1,
             state: DialogState::Early,
             branch_counter: 0,
+            invite_sent: None,
         }
     }
 
@@ -87,7 +91,29 @@ impl Dialog {
         req.body = offer.to_text().as_bytes().to_vec();
         req.headers
             .set("Content-Length", req.body.len().to_string());
+        self.invite_sent = Some(req.clone());
         req
+    }
+
+    /// CANCEL for an unanswered INVITE: RFC 3261 §9.1.
+    ///
+    /// The Request-URI, Call-ID, From, To and CSeq *number* match the INVITE,
+    /// and the Via branch is identical so the server can pair it with the
+    /// INVITE transaction. Only the CSeq method changes to CANCEL, and the body
+    /// is dropped. Returns `None` once a final response has been seen.
+    pub fn cancel(&mut self) -> Option<Request> {
+        if self.state != DialogState::Early {
+            return None;
+        }
+        let mut req = self.invite_sent.clone()?;
+        req.method = Method::Cancel;
+        req.headers
+            .set("CSeq", format!("{} CANCEL", self.invite_cseq));
+        req.headers.remove("Content-Type");
+        req.headers.remove("Contact");
+        req.body = Vec::new();
+        req.headers.set("Content-Length", "0");
+        Some(req)
     }
 
     /// Adopt the callee's tag from a response's `To` header (RFC 3261 §12.1).

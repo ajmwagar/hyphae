@@ -122,7 +122,22 @@ impl Message {
     pub fn parse(input: &str) -> Result<Self, ParseError> {
         let input = input.trim_start_matches('\u{feff}');
         let (head, body) = split_head_body(input);
+        Self::parse_parts(head, body.as_bytes())
+    }
 
+    /// Parse from raw bytes.
+    ///
+    /// The head is decoded as UTF-8 (SIP headers are ASCII on the wire), but
+    /// the body is preserved **verbatim**, so binary payloads survive — e.g. an
+    /// `application/vnd.3gpp.sms` RP-DATA body, which is not valid UTF-8.
+    pub fn parse_bytes(input: &[u8]) -> Result<Self, ParseError> {
+        let trimmed = input.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(input);
+        let (head, body) = split_head_body_bytes(trimmed);
+        let head = String::from_utf8_lossy(head);
+        Self::parse_parts(&head, body)
+    }
+
+    fn parse_parts(head: &str, raw_body: &[u8]) -> Result<Self, ParseError> {
         let mut lines = head.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
         let start = lines
             .next()
@@ -163,7 +178,7 @@ impl Message {
             headers.push(crate::Header::new(name, value));
         }
 
-        let body = truncate_body(body, headers.content_length())?;
+        let body = truncate_raw_body(raw_body, headers.content_length())?;
 
         if start.starts_with("SIP/") {
             let mut parts = start.splitn(3, ' ');
@@ -290,8 +305,24 @@ fn split_head_body(input: &str) -> (&str, &str) {
     }
 }
 
-fn truncate_body(body: &str, content_length: Option<usize>) -> Result<Vec<u8>, ParseError> {
-    let bytes = body.as_bytes();
+/// Byte-level head/body split, so a binary body is never decoded as text.
+fn split_head_body_bytes(input: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(i) = find_subslice(input, b"\r\n\r\n") {
+        (&input[..i], &input[i + 4..])
+    } else if let Some(i) = find_subslice(input, b"\n\n") {
+        (&input[..i], &input[i + 2..])
+    } else {
+        (input, &[])
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn truncate_raw_body(bytes: &[u8], content_length: Option<usize>) -> Result<Vec<u8>, ParseError> {
     match content_length {
         Some(n) if bytes.len() < n => Err(invalid(
             "Content-Length",
@@ -337,6 +368,23 @@ Content-Length: 0\r\n\r\n";
         assert!(text.contains("\r\nContent-Length: 0\r\n\r\n"));
         let reparsed = Message::parse(&text).unwrap();
         assert_eq!(reparsed, m);
+    }
+
+    #[test]
+    fn binary_body_survives_byte_parsing() {
+        // An SMS RP-DATA body is not valid UTF-8; parse_bytes must keep it
+        // verbatim. `Message::parse` (str) cannot represent it at all.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(
+            b"MESSAGE sip:x@ims SIP/2.0\r\nContent-Type: application/vnd.3gpp.sms\r\nContent-Length: 6\r\n\r\n",
+        );
+        let body = [0x01u8, 0x00, 0xFF, 0x00, 0x80, 0x0A];
+        raw.extend_from_slice(&body);
+        let message = Message::parse_bytes(&raw).unwrap();
+        let Message::Request(request) = message else {
+            panic!("expected a request");
+        };
+        assert_eq!(request.body, body);
     }
 
     #[test]

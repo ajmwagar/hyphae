@@ -30,7 +30,7 @@ fn udp_incoming_call_reaches_established() {
 
         // 1. INVITE arrives; build the callee dialog and ring.
         let (n, peer) = server.recv_from(&mut buf).unwrap();
-        let msg = sip::Message::parse(&String::from_utf8_lossy(&buf[..n])).unwrap();
+        let msg = sip::Message::parse_bytes(&buf[..n]).unwrap();
         let sip::Message::Request(invite) = msg else {
             panic!("expected INVITE");
         };
@@ -47,7 +47,7 @@ fn udp_incoming_call_reaches_established() {
 
         // 2. Caller answers the reliable 180 with a PRACK.
         let (n, peer) = server.recv_from(&mut buf).unwrap();
-        let msg = sip::Message::parse(&String::from_utf8_lossy(&buf[..n])).unwrap();
+        let msg = sip::Message::parse_bytes(&buf[..n]).unwrap();
         let sip::Message::Request(prack) = msg else {
             panic!("expected PRACK");
         };
@@ -69,7 +69,7 @@ fn udp_incoming_call_reaches_established() {
 
         // 4. ACK confirms the dialog.
         let (n, _peer) = server.recv_from(&mut buf).unwrap();
-        let msg = sip::Message::parse(&String::from_utf8_lossy(&buf[..n])).unwrap();
+        let msg = sip::Message::parse_bytes(&buf[..n]).unwrap();
         let sip::Message::Request(ack) = msg else {
             panic!("expected ACK");
         };
@@ -81,7 +81,7 @@ fn udp_incoming_call_reaches_established() {
 
         // 5. The caller sends BYE; the callee acknowledges and terminates.
         let (n, peer) = server.recv_from(&mut buf).unwrap();
-        let msg = sip::Message::parse(&String::from_utf8_lossy(&buf[..n])).unwrap();
+        let msg = sip::Message::parse_bytes(&buf[..n]).unwrap();
         let sip::Message::Request(bye) = msg else {
             panic!("expected BYE");
         };

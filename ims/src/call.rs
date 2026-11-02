@@ -23,6 +23,8 @@ pub enum CallState {
     AwaitingPrackResponse,
     /// PRACK confirmed; awaiting the final 2xx to INVITE.
     AwaitingInviteFinal,
+    /// CANCEL sent; awaiting the 200 to CANCEL and the 487 to INVITE.
+    Cancelling,
     /// 2xx to INVITE received and ACK sent; the dialog is confirmed.
     Established,
     /// A non-2xx final response ended the attempt.
@@ -139,6 +141,12 @@ impl Call {
         let is_invite_resp = cseq_method == Some(Method::Invite);
         let is_prack_resp = cseq_method == Some(Method::Prack);
 
+        // A CANCEL completes when the INVITE is terminated with 487 (RFC 3261 §9.1).
+        if is_invite_resp && status == 487 && self.state == CallState::Cancelling {
+            self.state = CallState::Terminated;
+            return CallEvent::Failed(487);
+        }
+
         // A reliable provisional (18x) carries the answer and an RSeq; PRACK it.
         if is_invite_resp && (101..200).contains(&status) {
             if let Some(rseq) = rseq_of(response) {
@@ -195,6 +203,23 @@ impl Call {
         }
         self.state = CallState::Terminated;
         Some(self.dialog.bye())
+    }
+
+    /// CANCEL an INVITE that has not been answered (RFC 3261 §9).
+    ///
+    /// Returns the CANCEL request, which the caller must send on the same
+    /// transport as the INVITE. The call moves to [`CallState::Cancelling`]
+    /// and completes when the `487 Request Terminated` arrives.
+    pub fn cancel(&mut self) -> Option<Request> {
+        if !matches!(
+            self.state,
+            CallState::Inviting | CallState::AwaitingPrackResponse | CallState::AwaitingInviteFinal
+        ) {
+            return None;
+        }
+        let cancel = self.dialog.cancel()?;
+        self.state = CallState::Cancelling;
+        Some(cancel)
     }
 
     /// Parse the SDP answer body of a response, if it has one.
@@ -386,6 +411,66 @@ mod tests {
         assert_eq!(call.state(), CallState::Failed(486));
         // BYE is unavailable once the attempt failed.
         assert!(call.bye().is_none());
+    }
+
+    #[test]
+    fn cancel_reuses_the_invite_branch_and_completes_with_487() {
+        let mut call = Call::new(
+            profile(),
+            "sip:001010000000002@ims.mnc001.mcc001.3gppnetwork.org",
+        );
+        let CallEvent::Send(invite) = call.invite() else {
+            panic!("invite expected")
+        };
+        let invite_branch = invite.headers.via().unwrap().branch().unwrap().to_string();
+
+        let cancel = call.cancel().expect("CANCEL before a final response");
+        assert_eq!(cancel.method, Method::Cancel);
+        // RFC 3261 §9.1: same branch, same CSeq number, only the method changes.
+        assert_eq!(
+            cancel.headers.via().unwrap().branch().unwrap(),
+            invite_branch
+        );
+        assert_eq!(cancel.headers.get("cseq"), Some("1 CANCEL"));
+        assert_eq!(cancel.headers.get("call-id"), invite.headers.get("call-id"));
+        assert_eq!(cancel.headers.get("to"), invite.headers.get("to"));
+        assert!(cancel.body.is_empty());
+        assert_eq!(cancel.headers.get("content-length"), Some("0"));
+        assert_eq!(call.state(), CallState::Cancelling);
+
+        // The 200 to CANCEL changes nothing; the 487 to INVITE ends the attempt.
+        let cancel_ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[("CSeq", "1 CANCEL")]),
+            body: Vec::new(),
+        };
+        assert_eq!(call.on_response(&cancel_ok), CallEvent::Provisional);
+        let terminated = Response {
+            status: 487,
+            reason: "Request Terminated".into(),
+            headers: resp_headers(&[("CSeq", "1 INVITE")]),
+            body: Vec::new(),
+        };
+        assert_eq!(call.on_response(&terminated), CallEvent::Failed(487));
+        assert_eq!(call.state(), CallState::Terminated);
+    }
+
+    #[test]
+    fn cancel_is_refused_once_established() {
+        let mut call = Call::new(profile(), "sip:b@example");
+        let _ = call.invite();
+        let ok = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: resp_headers(&[("CSeq", "1 INVITE")]),
+            body: Vec::new(),
+        };
+        assert!(matches!(
+            call.on_response(&ok),
+            CallEvent::Established { .. }
+        ));
+        assert!(call.cancel().is_none());
     }
 
     fn resp_headers(pairs: &[(&str, &str)]) -> sip::Headers {

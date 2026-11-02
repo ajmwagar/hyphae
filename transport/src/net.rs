@@ -114,9 +114,7 @@ impl Transport for UdpTransport {
         if self.peer.is_none() {
             self.peer = from;
         }
-        let text =
-            std::str::from_utf8(&buf[..n]).map_err(|e| TransportError::Codec(e.to_string()))?;
-        Message::parse(text)
+        Message::parse_bytes(&buf[..n])
             .map(Some)
             .map_err(|e| TransportError::Codec(e.to_string()))
     }
@@ -303,8 +301,8 @@ fn check_buffer_size(buf: &[u8]) -> Result<(), TransportError> {
 }
 
 fn parse_frame(bytes: &[u8]) -> Result<Message, TransportError> {
-    let text = std::str::from_utf8(bytes).map_err(|e| TransportError::Codec(e.to_string()))?;
-    Message::parse(text).map_err(|e| TransportError::Codec(e.to_string()))
+    // Bytes, not str: an SMS RP-DATA body is not valid UTF-8.
+    Message::parse_bytes(bytes).map_err(|e| TransportError::Codec(e.to_string()))
 }
 
 fn resolve_one(peer: impl ToSocketAddrs) -> Result<SocketAddr, TransportError> {

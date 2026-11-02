@@ -257,6 +257,192 @@ pub fn message_request(
     sender.message(profile, request_uri, submit)
 }
 
+// ---------------------------------------------------------------------------
+// Mobile-terminated (MT) direction: RP-DATA / SMS-DELIVER / RP-ACK
+// ---------------------------------------------------------------------------
+
+/// A GSM 03.40 `SMS-DELIVER` PDU (the MT direction the UE receives).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmsDeliver {
+    /// Originator (the sending MS).
+    pub originator: String,
+    /// TP-Protocol-Identifier.
+    pub pid: u8,
+    /// TP-Data-coding/message class.
+    pub dcs: u8,
+    /// TP-Service-Centre-Time-Stamp, 7 semi-octet BCD octets.
+    pub scts: [u8; 7],
+    /// User data (the text).
+    pub text: String,
+}
+
+impl SmsDeliver {
+    /// Encode the TPDU (TP-MTI = SMS-DELIVER, no more messages).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + self.text.len());
+        out.push(0x00); // TP-MTI = SMS-DELIVER (00), TP-MMS = 0
+        encode_bcd_address(&self.originator, &mut out);
+        out.push(self.pid);
+        out.push(self.dcs);
+        out.extend_from_slice(&self.scts);
+        let len = self.text.chars().count().min(160);
+        out.push(len as u8);
+        out.extend_from_slice(&pack_7bit(&self.text));
+        out
+    }
+
+    /// Decode an `SMS-DELIVER` TPDU. Returns `None` for any other MTI.
+    pub fn decode(tpdu: &[u8]) -> Option<Self> {
+        let mut d = Decoder { buf: tpdu, pos: 0 };
+        if d.u8()? & 0x03 != 0x00 {
+            return None; // not SMS-DELIVER
+        }
+        let originator = read_bcd_address(&mut d)?;
+        let pid = d.u8()?;
+        let dcs = d.u8()?;
+        let mut scts = [0u8; 7];
+        for b in &mut scts {
+            *b = d.u8()?;
+        }
+        let len = d.u8()? as usize;
+        let text = unpack_7bit(&d.buf[d.pos..], len);
+        Some(Self {
+            originator,
+            pid,
+            dcs,
+            scts,
+            text,
+        })
+    }
+}
+
+/// An RP-DATA unit in the **network-to-MS** direction (TS 24.011 §7.3.1.1).
+///
+/// ```text
+/// RP-MTI(0x01) | RP-MR | RP-Originator-Address | RP-Destination-Address
+///              | RP-User-Data (length || TPDU)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpData {
+    /// RP-MR message reference, echoed in the RP-ACK.
+    pub message_reference: u8,
+    /// RP-Originator-Address.
+    pub originator: String,
+    /// RP-Destination-Address.
+    pub destination: String,
+    /// The carried TPDU (an `SMS-DELIVER`).
+    pub tpdu: Vec<u8>,
+}
+
+impl RpData {
+    /// Serialise the RP-DATA unit.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + self.tpdu.len());
+        out.push(0x01); // RP-MTI = RP-DATA, network -> MS
+        out.push(self.message_reference);
+        encode_bcd_address(&self.originator, &mut out);
+        encode_bcd_address(&self.destination, &mut out);
+        out.push(self.tpdu.len() as u8);
+        out.extend_from_slice(&self.tpdu);
+        out
+    }
+
+    /// Parse an RP-DATA unit from a SIP `MESSAGE` body.
+    pub fn decode(body: &[u8]) -> Option<Self> {
+        let mut d = Decoder { buf: body, pos: 0 };
+        if d.u8()? != 0x01 {
+            return None; // not RP-DATA (network -> MS)
+        }
+        let message_reference = d.u8()?;
+        let originator = read_bcd_address(&mut d)?;
+        let destination = read_bcd_address(&mut d)?;
+        let len = d.u8()? as usize;
+        let end = d.pos.checked_add(len)?;
+        let tpdu = d.buf.get(d.pos..end)?.to_vec();
+        Some(Self {
+            message_reference,
+            originator,
+            destination,
+            tpdu,
+        })
+    }
+}
+
+/// Build the RP-ACK unit the UE returns for an accepted RP-DATA
+/// (TS 24.011 §7.3.2: RP-MTI = 0x02, the same RP-MR, empty user data).
+pub fn rp_ack(message_reference: u8) -> Vec<u8> {
+    vec![0x02, message_reference, 0x00]
+}
+
+/// A decoded incoming SMS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingSms {
+    /// The originating MS number.
+    pub originator: String,
+    /// The message text.
+    pub text: String,
+    /// RP message reference, needed to build the RP-ACK.
+    pub message_reference: u8,
+    /// The raw TPDU, for callers that want SCTS or DCS.
+    pub tpdu: Vec<u8>,
+}
+
+/// Parse an incoming SIP `MESSAGE` carrying RP-DATA / SMS-DELIVER
+/// (TS 24.341, TS 24.011, GSM 03.40).
+pub fn receive_message(request: &Request) -> Option<IncomingSms> {
+    if request.method != Method::Message {
+        return None;
+    }
+    let rp = RpData::decode(&request.body)?;
+    let deliver = SmsDeliver::decode(&rp.tpdu)?;
+    Some(IncomingSms {
+        originator: deliver.originator,
+        text: deliver.text,
+        message_reference: rp.message_reference,
+        tpdu: rp.tpdu,
+    })
+}
+
+/// Build the `200 OK` that acknowledges an incoming `MESSAGE` with an RP-ACK
+/// body, per TS 24.341 (the RP-ACK rides in the SIP response).
+pub fn delivery_response(
+    request: &Request,
+    profile: &crate::profile::ImsProfile,
+) -> Option<sip::Response> {
+    let incoming = receive_message(request)?;
+    let body = rp_ack(incoming.message_reference);
+    let mut headers = Headers::new();
+    for via in request.headers.get_all("via") {
+        headers.push(Header::new("Via", via));
+    }
+    if let Some(from) = request.headers.get("from") {
+        headers.push(Header::new("From", from));
+    }
+    if let Some(to) = request.headers.get("to") {
+        let value = if crate::dialog::extract_tag(to).is_some() {
+            to.to_string()
+        } else {
+            format!("{to};tag=fungos-sms-{}", profile.contact_port)
+        };
+        headers.push(Header::new("To", value));
+    }
+    if let Some(call_id) = request.headers.get("call-id") {
+        headers.push(Header::new("Call-ID", call_id));
+    }
+    if let Some(cseq) = request.headers.get("cseq") {
+        headers.push(Header::new("CSeq", cseq));
+    }
+    headers.push(Header::new("User-Agent", profile.user_agent.clone()));
+    headers.push(Header::new("Content-Type", "application/vnd.3gpp.sms"));
+    headers.push(Header::new("Content-Length", body.len().to_string()));
+    Some(sip::Response {
+        status: 200,
+        reason: "OK".into(),
+        headers,
+        body,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +532,108 @@ mod tests {
             first.headers.get("via").unwrap(),
             second.headers.get("via").unwrap()
         );
+    }
+
+    #[test]
+    fn deliver_pdu_round_trips_originator_and_text() {
+        let deliver = SmsDeliver {
+            originator: "15551234567".into(),
+            pid: 0,
+            dcs: 0,
+            scts: [0x42, 0x10, 0x51, 0x32, 0x41, 0x00, 0x00],
+            text: "lunch at noon?".into(),
+        };
+        let pdu = deliver.encode();
+        assert_eq!(pdu[0] & 0x03, 0x00, "TP-MTI must be SMS-DELIVER");
+        assert_eq!(SmsDeliver::decode(&pdu).unwrap(), deliver);
+    }
+
+    #[test]
+    fn rp_data_round_trips_and_is_not_confused_with_submit() {
+        let tpdu = SmsDeliver {
+            originator: "15551234567".into(),
+            pid: 0,
+            dcs: 0,
+            scts: [0u8; 7],
+            text: "hi".into(),
+        }
+        .encode();
+        let rp = RpData {
+            message_reference: 7,
+            originator: "15551234567".into(),
+            destination: "001010000000001".into(),
+            tpdu,
+        };
+        let body = rp.encode();
+        assert_eq!(body[0], 0x01, "RP-MTI network->MS must be 0x01");
+        assert_eq!(RpData::decode(&body).unwrap(), rp);
+        // A truncated body is rejected rather than panicking.
+        assert!(RpData::decode(&body[..body.len() - 1]).is_none());
+    }
+
+    #[test]
+    fn incoming_message_decodes_and_is_acknowledged() {
+        let profile = crate::profile::ImsProfile::lab_default();
+        let tpdu = SmsDeliver {
+            originator: "15551234567".into(),
+            pid: 0,
+            dcs: 0,
+            scts: [0x42, 0x10, 0x51, 0x32, 0x41, 0x00, 0x00],
+            text: "meet me at 9".into(),
+        }
+        .encode();
+        let rp = RpData {
+            message_reference: 42,
+            originator: "15551234567".into(),
+            destination: "001010000000001".into(),
+            tpdu,
+        };
+
+        let mut headers = Headers::new();
+        headers.push(Header::new(
+            "Via",
+            "SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-mt-1;rport",
+        ));
+        headers.push(Header::new("From", "<sip:ip-sm-gw@ims>;tag=gw-1"));
+        headers.push(Header::new("To", "<sip:001010000000001@ims>"));
+        headers.push(Header::new("Call-ID", "mt-sms-1"));
+        headers.push(Header::new("CSeq", "1 MESSAGE"));
+        headers.push(Header::new("Content-Type", "application/vnd.3gpp.sms"));
+        let request = Request {
+            method: Method::Message,
+            uri: "sip:001010000000001@ims".into(),
+            headers,
+            body: rp.encode(),
+        };
+
+        let incoming = receive_message(&request).expect("MT SMS should decode");
+        assert_eq!(incoming.originator, "15551234567");
+        assert_eq!(incoming.text, "meet me at 9");
+        assert_eq!(incoming.message_reference, 42);
+
+        let response = delivery_response(&request, &profile).expect("200 OK + RP-ACK");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("content-type"),
+            Some("application/vnd.3gpp.sms")
+        );
+        // RP-ACK echoes the RP-MR so the network can match it.
+        assert_eq!(response.body, rp_ack(42));
+        assert_eq!(response.body, vec![0x02, 42, 0x00]);
+        assert_eq!(response.headers.get("call-id"), Some("mt-sms-1"));
+        assert_eq!(response.headers.get("cseq"), Some("1 MESSAGE"));
+        assert!(response.headers.get("to").unwrap().contains("tag="));
+    }
+
+    #[test]
+    fn malformed_mt_message_is_rejected() {
+        let request = Request {
+            method: Method::Message,
+            uri: "sip:x@ims".into(),
+            headers: Headers::new(),
+            body: vec![0xFF, 0x00],
+        };
+        assert!(receive_message(&request).is_none());
+        assert!(delivery_response(&request, &crate::profile::ImsProfile::lab_default()).is_none());
     }
 }
