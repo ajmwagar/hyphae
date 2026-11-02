@@ -16,7 +16,7 @@ translated, or reconstructed from a vendor binary.
 | Codec | RFC 6716 (Opus), RFC 4867 (AMR/AMR-WB RTP), FIPS-197 (AES) |
 | Voice continuity | 3GPP TS 23.216 (EPS fallback, SRVCC); TS 24.229 §5.1.3 |
 | Card access | 3GPP TS 27.007 `+CSIM`; libqmi UIM `Send APDU` (service 0x0B, message 0x3B) |
-| Wi-Fi calling | RFC 5448 (EAP-AKA'); 3GPP TS 33.402 (CK'/IK'); RFC 4187 (EAP-AKA); RFC 7296 (IKEv2) |
+| Wi-Fi calling | RFC 5448 (EAP-AKA'); 3GPP TS 33.402 (CK'/IK'); RFC 4187 (EAP-AKA); RFC 7296 (IKEv2); RFC 5998 (EAP-only IKE_AUTH); RFC 3526 (MODP groups); RFC 4868 (HMAC-SHA-2); 3GPP TS 23.402 (S2b, §7.3) |
 
 Public copies are available from the IETF Datatracker, 3GPP FTP, and GSMA.
 Citations in code and fixtures point at the clause, not a vendor manual.

@@ -178,8 +178,20 @@ schedule, `epdg::sk` the AES-CBC + HMAC-SHA-256-128 encrypted payload, and
 `epdg::sa` the IKE_SA_INIT initiator (both sides derive the same keys in the
 conformance test), and `epdg::ike_auth` the EAP-only IKE_AUTH exchange
 (RFC 5998): encrypted `IDi/SAi2/TSi/TSr`, EAP-AKA' round trips inside SK, then
-`AUTH` computed over the EAP MSK with per-direction SignedOctets. Not
-implemented yet: installing the child SA in the kernel and the S2b bearer.
+`AUTH` computed over the EAP MSK with per-direction SignedOctets.
+
+`epdg::child` then turns the exchange's KEYMAT into the child SA — both SPIs,
+the AES-CBC and HMAC-SHA-256-128 keys, and the agreed traffic selectors — and
+`epdg::cp` reads the `CFG_REPLY` that carries the IMS address the ePDG assigned.
+`transport::ipsec::TunnelProgram` renders the S2b install: an XFRM interface
+bound by `if_id`, tunnel-mode ESP states, traffic-selector policies carrying the
+same `if_id`, and the inner address and route. `lab/s2b/verify.sh` runs the
+generated commands against a real kernel in two namespaces and pings across the
+tunnel, which is how two subtle requirements were found — the kernel defaults
+`auth` to a 96-bit ICV, and a policy template must repeat the state's `if_id`.
+
+Not implemented yet: driving the exchange over a socket, and the PC/SC adapter
+that would let a real USIM run this end to end.
 
 ## 7. ARM-first targets
 

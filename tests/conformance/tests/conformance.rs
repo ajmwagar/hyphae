@@ -2266,7 +2266,8 @@ fn epdg_009_ike_auth_eap_flow_establishes() {
     };
     use epdg::ike_auth::{AuthStep, IkeAuthInitiator};
     use epdg::ikev2::{
-        ExchangeType, Header, Id, Payload, PayloadType, FLAG_RESPONSE, ID_RFC822_ADDR,
+        ExchangeType, Header, Id, Payload, PayloadType, Proposal, Sa, TrafficSelectors, Transform,
+        FLAG_RESPONSE, ID_RFC822_ADDR, PROTO_ESP, TRANSFORM_ENCR, TRANSFORM_INTEG,
     };
     use epdg::keys::{derive_keys, skeyseed, IkeKeySizes};
     use epdg::sk::{Sk, BLOCK_LEN};
@@ -2384,16 +2385,243 @@ fn epdg_009_ike_auth_eap_flow_establishes() {
                 critical: false,
                 body: responder_auth,
             },
+            Payload {
+                kind: PayloadType::Sa,
+                critical: false,
+                body: Sa {
+                    proposals: vec![Proposal {
+                        number: 1,
+                        protocol_id: PROTO_ESP,
+                        spi: vec![0x00, 0x00, 0x20, 0x00],
+                        transforms: vec![
+                            Transform {
+                                transform_type: TRANSFORM_ENCR,
+                                id: epdg::child::ENCR_AES_CBC,
+                                attributes: vec![0x80, 0x0E, 0x00, 0x80],
+                            },
+                            Transform {
+                                transform_type: TRANSFORM_INTEG,
+                                id: epdg::child::AUTH_HMAC_SHA2_256_128,
+                                attributes: vec![],
+                            },
+                        ],
+                    }],
+                }
+                .encode(),
+            },
+            Payload {
+                kind: PayloadType::Tsi,
+                critical: false,
+                body: TrafficSelectors {
+                    selectors: vec![epdg::ikev2::Selector {
+                        ts_type: 7,
+                        ip_protocol: 0,
+                        start_port: 0,
+                        end_port: 0xffff,
+                        start_address: vec![10, 32, 0, 7],
+                        end_address: vec![10, 32, 0, 7],
+                    }],
+                }
+                .encode(),
+            },
+            Payload {
+                kind: PayloadType::Tsr,
+                critical: false,
+                body: TrafficSelectors {
+                    selectors: vec![epdg::ikev2::Selector {
+                        ts_type: 7,
+                        ip_protocol: 0,
+                        start_port: 0,
+                        end_port: 0xffff,
+                        start_address: vec![10, 32, 0, 0],
+                        end_address: vec![10, 32, 0, 255],
+                    }],
+                }
+                .encode(),
+            },
         ],
     );
-    let AuthStep::Established { child_keys } = auth.on_response(&msg, &iv, &mut peer).unwrap()
+    let AuthStep::Established {
+        child,
+        config,
+        child_keys,
+    } = auth.on_response(&msg, &iv, &mut peer).unwrap()
     else {
         panic!("expected Established");
     };
-    assert_eq!(child_keys.len(), 64);
+    // The child SA the exchange negotiated, ready to hand to transport::ipsec.
+    assert_eq!(child.outbound.spi, 0x2000);
+    assert_eq!(child.inbound.spi, 0xDEADBEEF);
+    assert_eq!(child.inbound.encryption.key(), &child_keys[48..64]);
+    assert_eq!(child.tsr[0].start_address, vec![10, 32, 0, 0]);
+    assert_eq!(child.tsr[0].end_address, vec![10, 32, 0, 255]);
+    // No CFG_REPLY was sent in this exchange.
+    assert!(config.is_none());
     assert_eq!(
         child_keys,
-        child_keymat(&keys.sk_d, &[0x33; 32], &[0x66; 32], 64)
+        child_keymat(&keys.sk_d, &[0x33; 32], &[0x66; 32], 128)
     );
     assert!(auth.is_established());
+}
+
+// --- EPDG-010: the Configuration payload --------------------------------
+
+#[test]
+fn epdg_010_configuration_payload_carries_the_ims_address() {
+    use epdg::cp::{
+        ConfigAttribute, ConfigPayload, CFG_REPLY, CFG_REQUEST, INTERNAL_IP4_ADDRESS,
+        INTERNAL_IP4_DNS,
+    };
+
+    // A request carries the types with no value.
+    let request = ConfigPayload::s2b_request();
+    assert_eq!(request.kind, CFG_REQUEST);
+    assert_eq!(request.encode(), vec![1, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0]);
+
+    // A reply carries the address the ePDG assigned plus its DNS servers.
+    let reply = ConfigPayload::reply(vec![
+        ConfigAttribute::new(INTERNAL_IP4_ADDRESS, [10, 32, 0, 7]),
+        ConfigAttribute::new(INTERNAL_IP4_DNS, [10, 32, 0, 1]),
+        ConfigAttribute::new(INTERNAL_IP4_DNS, [10, 32, 0, 2]),
+    ]);
+    let decoded = ConfigPayload::decode(&reply.encode()).unwrap();
+    assert_eq!(decoded.kind, CFG_REPLY);
+    assert_eq!(decoded.internal_ip4_address(), Some([10, 32, 0, 7]));
+    assert_eq!(
+        decoded.internal_ip4_dns(),
+        vec![[10, 32, 0, 1], [10, 32, 0, 2]]
+    );
+
+    // Values are padded to a 4-octet boundary; the length excludes the padding.
+    let odd = ConfigPayload::reply(vec![ConfigAttribute::new(
+        epdg::cp::APPLICATION_VERSION,
+        b"hyphae".to_vec(),
+    )]);
+    let bytes = odd.encode();
+    assert_eq!(bytes.len() % 4, 0);
+    assert_eq!(&bytes[8..14], b"hyphae");
+    assert_eq!(
+        ConfigPayload::decode(&bytes).unwrap().attributes[0].text(),
+        Some("hyphae")
+    );
+}
+
+// --- EPDG-011: the child SA ---------------------------------------------
+
+#[test]
+fn epdg_011_child_sa_splits_keymat_per_direction() {
+    use epdg::child::{ChildError, ChildSa, AUTH_HMAC_SHA2_256_128, ENCR_AES_CBC};
+    use epdg::ikev2::{Proposal, Transform, TRANSFORM_ENCR, TRANSFORM_INTEG};
+
+    // AES-CBC-128 (KEY_LENGTH 128) plus HMAC-SHA-256-128.
+    let proposal = Proposal {
+        number: 1,
+        protocol_id: epdg::ikev2::PROTO_ESP,
+        spi: vec![0x00, 0x00, 0x10, 0x00], // the responder's SPI
+        transforms: vec![
+            Transform {
+                transform_type: TRANSFORM_ENCR,
+                id: ENCR_AES_CBC,
+                attributes: vec![0x80, 0x0E, 0x00, 0x80],
+            },
+            Transform {
+                transform_type: TRANSFORM_INTEG,
+                id: AUTH_HMAC_SHA2_256_128,
+                attributes: vec![],
+            },
+        ],
+    };
+    let keymat: Vec<u8> = (0..96).map(|i| i as u8).collect();
+    let local_spi = 0x0000_1001;
+
+    let sa = ChildSa::from_proposal(&proposal, local_spi, &keymat, vec![], vec![]).unwrap();
+
+    // Outbound is the responder's SPI; inbound is the one we chose.
+    assert_eq!(sa.outbound.spi, 0x1000);
+    assert_eq!(sa.inbound.spi, 0x1001);
+    // Initiator→responder keys come first, in proposal order.
+    assert_eq!(sa.outbound.encryption.key(), &keymat[0..16]);
+    assert_eq!(sa.outbound.integrity.key(), &keymat[16..48]);
+    assert_eq!(sa.inbound.encryption.key(), &keymat[48..64]);
+    assert_eq!(sa.inbound.integrity.key(), &keymat[64..96]);
+    assert_eq!(sa.outbound.encryption.xfrm_name(), "cbc(aes)");
+    assert_eq!(sa.outbound.integrity.xfrm_name(), "hmac(sha256)");
+
+    // Short key material is refused, not silently truncated.
+    assert_eq!(
+        ChildSa::from_proposal(&proposal, local_spi, &keymat[..95], vec![], vec![]),
+        Err(ChildError::ShortKeymat { need: 96, got: 95 })
+    );
+}
+
+// --- EPDG-012: installing the S2b tunnel --------------------------------
+
+#[test]
+fn epdg_012_s2b_tunnel_program_installs_both_directions() {
+    use transport::ipsec::{S2bTunnel, TunnelEncryption, TunnelIntegrity, TunnelProgram, TunnelSa};
+
+    let tunnel = S2bTunnel {
+        interface: "ipsec0".into(),
+        if_id: 9,
+        local_addr: "192.0.2.10".into(),
+        remote_addr: "192.0.2.1".into(),
+        inbound: TunnelSa {
+            spi: 0x2001,
+            encryption: TunnelEncryption::AesCbc {
+                key: vec![0xa1; 16],
+            },
+            integrity: TunnelIntegrity::HmacSha256_128 {
+                key: vec![0xb2; 32],
+            },
+        },
+        outbound: TunnelSa {
+            spi: 0x2000,
+            encryption: TunnelEncryption::AesCbc {
+                key: vec![0xc3; 16],
+            },
+            integrity: TunnelIntegrity::HmacSha256_128 {
+                key: vec![0xd4; 32],
+            },
+        },
+        local_ts: "10.32.0.7/32".into(),
+        remote_ts: "10.32.0.0/24".into(),
+    };
+    let rendered = TunnelProgram::build(&tunnel).render();
+
+    // The interface is created and bound by if_id.
+    assert_eq!(rendered[0], "ip link add ipsec0 type xfrm if_id 9");
+
+    // Both SA directions are tunnel mode and carry the same if_id.
+    let out = &rendered[2];
+    assert!(out.contains("spi 0x2000") && out.contains("mode tunnel") && out.contains("if_id 9"));
+    // The ICV must be pinned to 128 bits: bare `auth` installs 96.
+    assert!(
+        out.contains(&format!(
+            "auth-trunc hmac(sha256) 0x{} 128",
+            "d4".repeat(32)
+        )),
+        "{out}"
+    );
+    assert!(out.contains(&format!("enc cbc(aes) 0x{}", "c3".repeat(16))));
+    assert!(rendered[3].contains("spi 0x2001"));
+
+    // Policies key on the traffic selectors and carry if_id in the template.
+    let policy_out = &rendered[4];
+    assert!(policy_out.contains("dir out"));
+    assert!(policy_out.contains("src 10.32.0.7/32 dst 10.32.0.0/24"));
+    assert!(policy_out.contains("tmpl src 192.0.2.10 dst 192.0.2.1"));
+    assert!(policy_out.contains("if_id 9"));
+    assert!(
+        !policy_out.contains("sport"),
+        "S2b is not the Gm UDP profile"
+    );
+
+    // The inner address and route complete the install.
+    assert_eq!(rendered[6], "ip addr add 10.32.0.7/32 dev ipsec0");
+    assert_eq!(rendered[7], "ip route add 10.32.0.0/24 dev ipsec0");
+
+    // Teardown reverses it.
+    let teardown = TunnelProgram::teardown(&tunnel).render();
+    assert_eq!(teardown[0], "ip route del 10.32.0.0/24 dev ipsec0");
+    assert_eq!(teardown.last().unwrap(), "ip link delete ipsec0");
 }
