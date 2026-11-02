@@ -2083,3 +2083,63 @@ fn epdg_003_eap_aka_prime_peer_answers_the_challenge() {
     let mut peer = AkaPrimePeer::new(network, keys, res.to_vec());
     assert!(peer.on_request(&wrong).is_err());
 }
+
+// --- EPDG-004/005: IKEv2 Diffie-Hellman and key schedule ------------------
+
+#[test]
+fn epdg_004_ikev2_diffie_hellman_agrees() {
+    use epdg::dh::{group_parameters, DhError, DhKeyPair};
+
+    // Group 14 is the RFC 3526 2048-bit MODP group that IKEv2 requires.
+    let (prime, generator) = group_parameters(14).unwrap();
+    assert_eq!(prime.bits(), 2048);
+    assert_eq!(generator, 2);
+
+    let alice = DhKeyPair::from_private(14, &[0x11; 32]).unwrap();
+    let bob = DhKeyPair::from_private(14, &[0x22; 32]).unwrap();
+    let a = alice.agree(&bob.public_bytes()).unwrap();
+    let b = bob.agree(&alice.public_bytes()).unwrap();
+    assert_eq!(a, b, "both sides derive the same g^ir");
+    assert_eq!(a.len(), 256, "shared secret is modulus-length padded");
+
+    // Out-of-range peer values are rejected rather than used.
+    assert_eq!(alice.agree(&[0x00]), Err(DhError::BadPeerPublic));
+    assert_eq!(alice.agree(&[0x01]), Err(DhError::BadPeerPublic));
+    assert_eq!(
+        group_parameters(19).unwrap_err(),
+        DhError::UnsupportedGroup(19)
+    );
+}
+
+#[test]
+fn epdg_005_ikev2_key_schedule_splits_the_prf_stream() {
+    use epdg::keys::{derive_keys, prf_plus, skeyseed, IkeKeySizes};
+
+    let shared = [0xAAu8; 256];
+    let ni = [0x01u8; 32];
+    let nr = [0x02u8; 32];
+
+    // SKEYSEED = prf(Ni|Nr, g^ir).
+    let seed = skeyseed(&ni, &nr, &shared);
+    assert_eq!(seed, skeyseed(&ni, &nr, &shared));
+    assert_ne!(seed, skeyseed(&nr, &ni, &shared));
+
+    // {SK_d|SK_ai|SK_ar|SK_ei|SK_er|SK_pi|SK_pr} = prf+(SKEYSEED, Ni|Nr).
+    let sizes = IkeKeySizes::aes_cbc_128_sha256_128();
+    let keys = derive_keys(&seed, &ni, &nr, sizes);
+    assert_eq!(keys.sk_d.len(), 32);
+    assert_eq!(keys.sk_ei.len(), 16);
+    assert_eq!(keys.sk_er.len(), 16);
+    assert_eq!(keys.sk_ai.len(), 32);
+    assert_eq!(keys.sk_pr.len(), 32);
+
+    let both = [&ni[..], &nr[..]].concat();
+    let material = prf_plus(&seed, &both, 32 + 32 + 32 + 16 + 16 + 32 + 32);
+    assert_eq!(keys.sk_d, material[..32]);
+    assert_eq!(keys.sk_ai, material[32..64]);
+    assert_eq!(keys.sk_ar, material[64..96]);
+    assert_eq!(keys.sk_ei, material[96..112]);
+    assert_eq!(keys.sk_er, material[112..128]);
+    assert_eq!(keys.sk_pi, material[128..160]);
+    assert_eq!(keys.sk_pr, material[160..192]);
+}

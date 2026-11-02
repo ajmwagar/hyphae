@@ -173,8 +173,9 @@ ePDG authenticated with EAP-AKA'. The crypto core is in
 `aka::eap_aka_prime`: `CK'/IK'` bound to the access-network name, the RFC 5448
 `PRF'` expansion into `K_encr`/`K_aut`/`K_re`/`MSK`/`EMSK`, the AT attribute
 framing and `AT_MAC`. The `epdg` crate adds the IKEv2 message/payload codec and
-an EAP-AKA' peer that verifies the server MAC and answers with `AT_RES`. Not
-implemented yet: Diffie-Hellman, the SK encryption/integrity layer, the
+an EAP-AKA' peer that verifies the server MAC and answers with `AT_RES`. `epdg::dh` adds the RFC 3526 MODP groups and `epdg::keys` the
+`SKEYSEED`/`prf+` schedule (`SK_d`/`SK_ai`/`SK_ar`/`SK_ei`/`SK_er`/`SK_pi`/
+`SK_pr`). Not implemented yet: the SK encryption/integrity layer, the
 IKE_SA_INIT/SA_AUTH state machine and the S2b bearer.
 
 ## 7. ARM-first targets
