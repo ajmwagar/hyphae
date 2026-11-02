@@ -9,16 +9,18 @@ Status: **spec matrix green**. The control-plane state machine, Milenage/AKA,
 SDP offer/answer with RFC 3312 preconditions, RFC 4867 and TS 26.445 (EVS)
 payload formats, SMS over IMS, the caller-side call path, carrier loader, RTP/RTCP media framing (RFC 3550
 plus a jitter buffer and PLC), and the mock plus the modem-modeled AT/QMI, MBIM
-and CCCI-boundary transports compile and have spec-derived tests. The standalone
-CLI works in mock/lab mode. Real IPsec SA/crypto, the byte-level AT/QMI I/O and
-the out-of-tree CCCI `/dev/ccci_*` adapter are the remaining stubbed or
-product-gated rows (see [`docs/specs.md`](docs/specs.md)).
+and CCCI-boundary transports compile and have spec-derived tests. Emergency
+(E911) request construction per TS 24.229 §5.1.6 is modelled purely as messages.
+The standalone CLI works in mock/lab mode. Real IPsec SA/crypto, the byte-level
+AT/QMI I/O, the out-of-tree CCCI `/dev/ccci_*` adapter and *live* emergency
+calling (a regulated product gate) are the remaining stubbed or product-gated
+rows (see [`docs/specs.md`](docs/specs.md)).
 
 ## Why it matters
 
 - VoLTE/IMS is the only voice path left on many networks; there is no libre
   AP-side client to put on a Linux phone.
-- The modem side (QMI/CCCI), network side (Open5GS/Kamailio) and OS side exist.
+- The modem side (QMI/MBIM/CCCI), network side (Open5GS/Kamailio) and OS side exist.
   The client is the gap.
 - The design keeps protocol work independent of patent-encumbered codecs, so the
   GPL core can be built, tested and distributed without a codec royalty.
@@ -45,7 +47,8 @@ product-gated rows (see [`docs/specs.md`](docs/specs.md)).
 ```text
 sip/        RFC 3261 messages, headers, transactions; no I/O
 aka/        Milenage f1–f5, AUTN verification, RFC 3310 RES; pure functions
-ims/        profile, REGISTER/401/407, SDP offer/answer, PRACK/UPDATE/BYE
+ims/        profile, REGISTER/401/407, SDP offer/answer, PRACK/UPDATE/BYE,
+            emergency (E911) request construction
 carrier/    TOML profiles keyed by MCC/MNC + lab profile 00101
 codec/      Codec trait + optional Opus (feature `opus`); PCM only
 codec-amr/  RFC 4867 payload format + optional AMR-WB FFI (separate package)

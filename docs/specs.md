@@ -37,7 +37,7 @@ module. "TODO" rows are deliberately not claimed as implemented.
 | INV-002 | Preconditions and `100rel` SDP answer handling | RFC 3312; 3GPP TS 24.229 §5.1.3 | `inv_002_preconditions_offered_and_answered`, `parses_rfc3312_preconditions` | ims |
 | SMS-001 | SMS over IMS (RP/CP and SIP MESSAGE) | 3GPP TS 24.341; GSMA IR.92 §5 | `sms_001_sip_message_carries_rp_data`, `pdu_round_trips_destination_and_text` | ims |
 | EVS-001 | EVS RTP payload format (TS 26.445 app. A, Header-Full): CMR/ToC bytes, Primary + AMR-WB IO frame tables, speech/SID/lost/no-data classification, multi-frame round-trip, frame-size validation; Compact/storage/multi-channel rejected | 3GPP TS 26.445 §appendix A (A.1–A.3); clock 48 kHz, 20 ms frames | `evs_001_cmr_toc_byte_round_trips`, `evs_001_frame_table_classification`, `evs_001_primary_speech_frame_sizes`, `evs_001_multi_frame_round_trips`, `evs_001_compact_format_is_rejected` | evs, conformance |
-| E911-001 | Emergency session identity and call routing | 3GPP TS 24.229 §5.1.6; local regulation | **TODO** (product gate) | ims |
+| E911-001 | Emergency session identity and routing: RFC 5031 `urn:service:sos[.*]` target, registered or IMSI-derived temporary identity, PIDF-LO location, and the TS 24.229 §5.1.6.3 emergency INVITE (`Resource-Priority: esnet.0`, `Geolocation-Routing: yes`). Request building only — the CLI refuses every non-mock transport and never transmits an emergency request | RFC 5031; 3GPP TS 24.229 §5.1.6; RFC 4119/5491 (PIDF-LO); RFC 4412; RFC 6442 | `e911_001_emergency_invite_targets_the_service_urn`, `e911_001_geolocation_is_routed_as_pidf_lo` | ims, conformance |
 | MEDIA-001 | RTP/RTCP framing, jitter buffer, PLC | RFC 3550; RFC 4867 §9 | `media_001_rtp_amr_frame_round_trips_the_wire`, `media_001_rtcp_sender_report_survives_the_wire`, `media_001_jitter_buffer_reorders_and_flags_loss`, `media_001_plc_conceals_a_lost_frame` | media |
 | TRN-001 | AT/QMI transport on a modem-managed IMS PDN | 3GPP TS 27.007; QMI IMS | `local_addr_is_the_modem_pdn_address`, `delivers_over_the_pdn_loopback` | transport |
 | TRN-002 | MTK CCCI vendor-channel shim: SIP survives a length-framed vendor channel; the `/dev/ccci_*` adapter is a pluggable, out-of-tree `VendorChannel` | Vendor channel; no vendor code may enter the tree | `trn_002_sip_survives_the_ccci_channel_boundary` | transport |
@@ -63,7 +63,7 @@ module. "TODO" rows are deliberately not claimed as implemented.
   `TRN-002` (CCCI, `transport::ccci`) ships only the vendor *boundary* — a
   `VendorChannel` trait plus this tree's own length framing — because CCCI is a
   vendor interface with no public spec, so no vendor header or device code can
-  enter the tree. `E911-001` (product gate) remains unclaimed. `EVS-001` is implemented as
+  enter the tree. `EVS-001` is implemented as
   the TS 26.445 appendix A *Header-Full* RTP payload format only (no speech
   codec); see the media-path note below.
 * **Media path.** The `media` crate frames RTP/RTCP and buffers playout. It

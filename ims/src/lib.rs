@@ -15,6 +15,7 @@
 pub mod auth;
 pub mod call;
 pub mod dialog;
+pub mod emergency;
 pub mod profile;
 pub mod register;
 pub mod sdp;
@@ -22,6 +23,7 @@ pub mod sms;
 
 pub use call::{Call, CallEvent, CallState};
 pub use dialog::{Dialog, DialogState};
+pub use emergency::{EmergencyIdentity, EmergencyRequest, Geolocation, SosService};
 pub use profile::{ImsProfile, SecurityClient};
 pub use register::{Challenge, Registration, RegistrationEvent, RegistrationState};
 pub use sdp::{Connection, Media, Origin, PrecondDir, Precondition, Sdp};
