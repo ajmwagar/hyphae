@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "hyphae-modem"
+path = "src/main.rs"
+required-features = ["modem-qmi"]
+
 # The hardware path is opt-in so the IMS and lab builds keep their dependency
 # graph exactly as it is: no sockets, no FFI, nothing.
 [features]

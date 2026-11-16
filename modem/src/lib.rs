@@ -34,6 +34,8 @@
 //! | [`wds`] | WDS bind/start/stop/get-current-settings on service 1, and [`wds::BearerConfig`] |
 //! | [`bearer`] | the state machine: order, teardown, retry with backoff |
 //! | [`netlink`] | rtnetlink encoders plus the interface configuration |
+//! | `link` | the hardware implementation of [`bearer::Modem`] |
+//! | [`cli`] | the `hyphae-modem` command line |
 //!
 //! The codec modules ([`qrtr`]'s packet type, [`qmi`], [`dpm`], [`wds`]) and the
 //! state machine ([`bearer`]) are pure and tested on any host. [`netlink`]'s
@@ -46,9 +48,10 @@
 //!
 //! * default build: no `libc`, no sockets, no `unsafe` — the IMS and lab builds
 //!   keep exactly the dependency graph they had;
-//! * `--features modem-qmi` adds `libc` and compiles the `AF_QIPCRTR` socket
-//!   and `netlink::Interface`. Those modules are `target_os = "linux"` only; on
-//!   another host the codecs and the state machine still build and test.
+//! * `--features modem-qmi` adds `libc` and compiles `link`, the `AF_QIPCRTR`
+//!   socket and `netlink::Interface`. Those modules are `target_os = "linux"`
+//!   only; on another host the codecs and the state machine still build and
+//!   test, and the binary exits with a message.
 //!
 //! ```text
 //!   cargo test -p hyphae-modem                                        # codecs + state machine
@@ -84,8 +87,11 @@
 #![deny(unsafe_code)]
 
 pub mod bearer;
+pub mod cli;
 pub mod dpm;
 mod error;
+#[cfg(all(feature = "modem-qmi", target_os = "linux"))]
+pub mod link;
 pub mod netlink;
 pub mod qmi;
 pub mod qrtr;
