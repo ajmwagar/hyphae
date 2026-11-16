@@ -25,7 +25,14 @@ fn main() {
     }
 
     #[cfg(all(feature = "modem-qmi", target_os = "linux"))]
-    std::process::exit(run::main(args));
+    {
+        let code = run::main(args);
+        // stdout is block-buffered when it is a pipe or a log file, and
+        // `process::exit` does not flush it. A run that failed at the last
+        // step therefore looked like a run that printed nothing at all.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        std::process::exit(code);
+    }
 
     #[cfg(not(all(feature = "modem-qmi", target_os = "linux")))]
     {

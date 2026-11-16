@@ -86,6 +86,10 @@ fn drive<N: bearer::NetworkConfig>(
         let entered = last.as_ref() != Some(&state);
         if entered {
             println!("{state}");
+            // A supervised instance's output is a pipe, so this is buffered;
+            // a transition that is printed but not flushed is a transition
+            // nobody sees when the process is killed mid-run.
+            let _ = std::io::Write::flush(&mut std::io::stdout());
             last = Some(state.clone());
         }
 
