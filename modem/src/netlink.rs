@@ -399,15 +399,22 @@ mod sys {
         /// channel, which happens just *after* `WDS Start Network` returns, so
         /// resolving immediately races the kernel workqueue that creates it.
         /// Wait for it instead: bounded, and only for the name lookup.
+        ///
+        /// The bound is generous on purpose. Five seconds was not enough on
+        /// real hardware — a bearer that had come up fine a minute earlier
+        /// failed here, and the process exited with the call still active, so
+        /// the only symptom was "no wwan0" and no retry.
         pub fn new(name: &str) -> Result<Self, Error> {
-            const WAIT: Duration = Duration::from_secs(5);
-            const STEP: Duration = Duration::from_millis(50);
+            const WAIT: Duration = Duration::from_secs(60);
+            const STEP: Duration = Duration::from_millis(100);
 
             let c_name = CString::new(name).map_err(|_| Error::Malformed {
                 what: "interface name contains a NUL byte",
             })?;
 
-            let deadline = Instant::now() + WAIT;
+            let start = Instant::now();
+            let deadline = start + WAIT;
+            let mut announced = false;
             let ifindex = loop {
                 // SAFETY: `c_name` is NUL-terminated and outlives the call.
                 let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
@@ -415,10 +422,16 @@ mod sys {
                     break index;
                 }
                 if Instant::now() >= deadline {
-                    return Err(io_error("if_nametoindex", io::Error::last_os_error()));
+                    return Err(io_error("if_nametoindex", io::Error::last_os_error()))
+;
+                }
+                if !announced && start.elapsed() >= Duration::from_secs(1) {
+                    eprintln!("hyphae-modem: waiting for {name} (the modem creates it when it opens its data channel)");
+                    announced = true;
                 }
                 thread::sleep(STEP);
             };
+
 
             // SAFETY: a plain socket(2) call with constant arguments.
             let raw = unsafe {
