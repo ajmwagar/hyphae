@@ -109,23 +109,30 @@ installed SIM is `fast.t-mobile.com`; the validated bearer reported address
 
 ## What is verified, and what is not
 
-Verified on this machine (no hardware):
+Verified without hardware:
 
 * every codec against the vectors above, including the error path;
 * the state machine against a mock modem that enforces "bind on the same
   client", covering the happy path, `INVALID_OPERATION` on start, and recovery
-  after a simulated reset.
+  after a simulated reset;
+* the interface layer's ordering rules, which run under
+  `cargo test -p hyphae-modem --features modem-qmi --target x86_64-unknown-linux-gnu`:
+  building the configurator never needs the interface to exist, and
+  `configure` waits for it.
+
+Verified on the CAT S22 (`40b89e5c`): the whole sequence — DPM open, bind,
+start, settings and the rtnetlink writes — brings `wwan0` up with
+`192.0.0.2/32` and a default route via `192.0.0.1 dev wwan0`; `ping -c3 8.8.8.8`
+answered 3/3 at 45–52 ms. That run settles the IPv4 byte order: the address is
+`192.0.0.2`, not `2.0.0.192`.
 
 Not yet verified on hardware:
 
-* the DPM bind/start/settings requests as this crate encodes them (byte-exact
-  against the public definitions, not yet sent by this code);
-* the byte order of the IPv4/Gateway/DNS/MTU TLVs. They are `guint32`
-  **little-endian** in libqmi's service definition, so that is what
-  `BearerConfig::from_current_settings` reads; a wrong reading shows up
-  immediately as `2.0.0.192` instead of `192.0.0.2` in the output below;
-* the rtnetlink requests (the parser is tested against a capture; the requests
-  need `CAP_NET_ADMIN`).
+* the DNS and MTU values that run read (same parsing path as the address, but
+  the values are not in its record);
+* recovery after a real modem reset — the state machine covers it with a mock,
+  the device has not had one while the bearer was up;
+* `--lookup` and `--dry-run` on the device.
 
 ## Running it on the phone
 
@@ -160,6 +167,11 @@ ip -4 addr show wwan0; ip route show default
 Step 2 prints the address, gateway, DNS and MTU the modem reported and the
 state transitions as they happen; it needs `CAP_NET_ADMIN` (root) and an
 interface named `wwan0` (`--iface` if the driver names it differently).
+
+`configure` runs right after `Start Network` and waits up to five seconds for
+`wwan0` to appear, because `bam-dmux` creates the netdev from a work item once
+the modem opens its channel. On a cold device that is the first moment the name
+resolves, so nothing has to be brought up by hand before step 2.
 
 ## Known gaps
 

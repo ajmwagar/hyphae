@@ -29,6 +29,12 @@
 //! sets. The metric (50) puts the bearer above a DHCP lease route while it is
 //! up; the prototype used the same value.
 //!
+//! The interface name is resolved inside `configure`, not when the configurator
+//! is built: `bam-dmux` registers the netdev from a work item once the modem
+//! opens its channel, which happens just after `WDS Start Network`. `configure`
+//! therefore waits for the name, bounded at five seconds; teardown does not
+//! wait, because an interface that is gone has nothing to clear.
+//!
 //! Teardown deletes the default route and flushes the addresses. Deleting
 //! something that is already gone (`ESRCH`) is not an error here: a bearer that
 //! was never applied, or that another process already tore down, is not a
@@ -380,45 +386,48 @@ mod sys {
         }
     }
 
+    /// How long [`NetworkConfig::configure`] waits for the interface to appear.
+    ///
+    /// The netdev is created by a kernel work item when the modem opens its BAM
+    /// DMUX channel, which arrives just after `WDS Start Network` returns — so
+    /// the first `configure` is the first moment the name can resolve.
+    const APPEAR_WAIT: Duration = Duration::from_secs(5);
+
+    /// Poll interval while waiting for the interface.
+    const APPEAR_STEP: Duration = Duration::from_millis(50);
+
     /// An interface as the kernel sees it.
+    ///
+    /// The name is kept, not the index: the index is resolved at the point of
+    /// use, because the interface may not exist yet when this is built.
     ///
     /// Requires `CAP_NET_ADMIN` to change anything; reads (the address dump)
     /// work as an ordinary user.
     #[derive(Debug)]
     pub struct Interface {
         fd: OwnedFd,
-        ifindex: u32,
+        name: CString,
         seq: Cell<u32>,
         timeout: Duration,
+        appear_wait: Duration,
     }
 
     impl Interface {
-        /// Open a netlink socket and resolve `name` to an index.
+        /// Open a netlink socket for `name`.
         ///
-        /// The interface does not exist until the modem opens its BAM DMUX
-        /// channel, which happens just *after* `WDS Start Network` returns, so
-        /// resolving immediately races the kernel workqueue that creates it.
-        /// Wait for it instead: bounded, and only for the name lookup.
+        /// The interface is deliberately not resolved here: on a cold start it
+        /// does not exist yet, and construction happens before the QMI sequence
+        /// that brings it into being. [`NetworkConfig::configure`] waits for it
+        /// instead, where it is actually needed.
         pub fn new(name: &str) -> Result<Self, Error> {
-            const WAIT: Duration = Duration::from_secs(5);
-            const STEP: Duration = Duration::from_millis(50);
+            Self::with_appear_wait(name, APPEAR_WAIT)
+        }
 
+        /// [`Self::new`] with the wait overridden; the tests use a short one.
+        fn with_appear_wait(name: &str, appear_wait: Duration) -> Result<Self, Error> {
             let c_name = CString::new(name).map_err(|_| Error::Malformed {
                 what: "interface name contains a NUL byte",
             })?;
-
-            let deadline = Instant::now() + WAIT;
-            let ifindex = loop {
-                // SAFETY: `c_name` is NUL-terminated and outlives the call.
-                let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-                if index != 0 {
-                    break index;
-                }
-                if Instant::now() >= deadline {
-                    return Err(io_error("if_nametoindex", io::Error::last_os_error()));
-                }
-                thread::sleep(STEP);
-            };
 
             // SAFETY: a plain socket(2) call with constant arguments.
             let raw = unsafe {
@@ -452,15 +461,52 @@ mod sys {
 
             Ok(Self {
                 fd,
-                ifindex,
+                name: c_name,
                 seq: Cell::new(0),
                 timeout: Duration::from_secs(5),
+                appear_wait,
             })
         }
 
-        /// The kernel's index for the interface.
-        pub fn ifindex(&self) -> u32 {
-            self.ifindex
+        /// One name lookup, no waiting.
+        fn name_index(&self) -> io::Result<u32> {
+            // SAFETY: `self.name` is NUL-terminated and outlives the call.
+            let index = unsafe { libc::if_nametoindex(self.name.as_ptr()) };
+            if index == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(index)
+            }
+        }
+
+        /// The interface index, waiting up to `appear_wait` for it to exist.
+        ///
+        /// The error reported at the deadline is the one from the last lookup,
+        /// so the message still says why the name did not resolve.
+        fn index(&self) -> Result<u32, Error> {
+            let deadline = Instant::now() + self.appear_wait;
+            loop {
+                let error = match self.name_index() {
+                    Ok(index) => return Ok(index),
+                    Err(error) => error,
+                };
+                if Instant::now() >= deadline {
+                    return Err(io_error("if_nametoindex", error));
+                }
+                thread::sleep(APPEAR_STEP);
+            }
+        }
+
+        /// The index if the interface exists right now.
+        ///
+        /// Teardown uses this: waiting five seconds for a netdev that is not
+        /// coming back would only delay the retry.
+        fn index_if_present(&self) -> Result<Option<u32>, Error> {
+            match self.name_index() {
+                Ok(index) => Ok(Some(index)),
+                Err(error) if error.raw_os_error() == Some(libc::ENODEV) => Ok(None),
+                Err(error) => Err(io_error("if_nametoindex", error)),
+            }
         }
 
         fn next_seq(&self) -> u32 {
@@ -569,8 +615,8 @@ mod sys {
             }
         }
 
-        /// Every IPv4 address currently on this interface.
-        fn addresses(&self) -> Result<Vec<AddressEntry>, Error> {
+        /// Every IPv4 address currently on `ifindex`.
+        fn addresses(&self, ifindex: u32) -> Result<Vec<AddressEntry>, Error> {
             let seq = self.next_seq();
             self.send(&dump_addresses(seq))?;
 
@@ -607,7 +653,7 @@ mod sys {
                     if reply.kind != RTM_NEWADDR {
                         continue;
                     }
-                    if let Some(entry) = parse_address_reply(reply.payload, self.ifindex) {
+                    if let Some(entry) = parse_address_reply(reply.payload, ifindex) {
                         entries.push(entry);
                     }
                 }
@@ -617,16 +663,21 @@ mod sys {
 
     impl NetworkConfig for Interface {
         fn configure(&self, config: &BearerConfig) -> Result<(), Error> {
+            // The netdev may still be appearing: the modem opens its channel
+            // just after Start Network and the kernel creates the interface
+            // from a work item.
+            let ifindex = self.index()?;
+
             let seq = self.next_seq();
-            self.request("RTM_NEWLINK", link_up(seq, self.ifindex), seq)?;
+            self.request("RTM_NEWLINK", link_up(seq, ifindex), seq)?;
 
             // Flush first, so a retry cannot stack addresses on top of a
             // previous partial attempt.
-            for entry in self.addresses()? {
+            for entry in self.addresses(ifindex)? {
                 let seq = self.next_seq();
                 self.request_allowing(
                     "RTM_DELADDR",
-                    del_address(seq, self.ifindex, &entry),
+                    del_address(seq, ifindex, &entry),
                     seq,
                     &[libc::ESRCH],
                 )?;
@@ -635,25 +686,28 @@ mod sys {
             let seq = self.next_seq();
             self.request(
                 "RTM_NEWADDR",
-                add_address(seq, self.ifindex, config.address),
+                add_address(seq, ifindex, config.address),
                 seq,
             )?;
 
             let seq = self.next_seq();
             self.request(
                 "RTM_NEWROUTE",
-                add_default_route(seq, self.ifindex, config.gateway),
+                add_default_route(seq, ifindex, config.gateway),
                 seq,
             )?;
             Ok(())
         }
 
         fn clear(&self) -> Result<(), Error> {
-            for entry in self.addresses()? {
+            let Some(ifindex) = self.index_if_present()? else {
+                return Ok(());
+            };
+            for entry in self.addresses(ifindex)? {
                 let seq = self.next_seq();
                 self.request_allowing(
                     "RTM_DELADDR",
-                    del_address(seq, self.ifindex, &entry),
+                    del_address(seq, ifindex, &entry),
                     seq,
                     &[libc::ESRCH],
                 )?;
@@ -661,7 +715,7 @@ mod sys {
             let seq = self.next_seq();
             self.request_allowing(
                 "RTM_DELROUTE",
-                del_default_route(seq, self.ifindex),
+                del_default_route(seq, ifindex),
                 seq,
                 &[libc::ESRCH],
             )?;
@@ -672,11 +726,43 @@ mod sys {
     #[cfg(test)]
     mod tests {
         use super::Interface;
+        use crate::bearer::NetworkConfig;
+        use crate::wds::BearerConfig;
+        use std::net::Ipv4Addr;
+        use std::time::{Duration, Instant};
+
+        fn config() -> BearerConfig {
+            BearerConfig {
+                address: Ipv4Addr::new(192, 0, 0, 2),
+                gateway: Ipv4Addr::new(192, 0, 0, 1),
+                dns: [None, None],
+                mtu: 1472,
+            }
+        }
 
         #[test]
-        fn an_unknown_interface_is_rejected() {
-            // Fails in `if_nametoindex`, before any privileged operation.
-            assert!(Interface::new("hyphae-no-such0").is_err());
+        fn building_the_configurator_does_not_need_the_interface() {
+            // On a cold start the netdev exists only after `WDS Start Network`,
+            // which is long after the CLI builds this.
+            let interface = Interface::with_appear_wait("hyphae-no-such0", Duration::ZERO)
+                .expect("construction must not look the name up");
+            assert!(interface.configure(&config()).is_err());
+            assert!(
+                interface.clear().is_ok(),
+                "an interface that is gone has nothing to clear"
+            );
+        }
+
+        #[test]
+        fn configure_waits_for_the_interface_to_appear() {
+            let wait = Duration::from_millis(120);
+            let interface = Interface::with_appear_wait("hyphae-no-such0", wait).unwrap();
+            let started = Instant::now();
+            assert!(interface.configure(&config()).is_err());
+            assert!(
+                started.elapsed() >= wait,
+                "configure must wait for the name before giving up"
+            );
         }
     }
 }
