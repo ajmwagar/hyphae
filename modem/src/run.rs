@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use hyphae_modem::bearer::{self, Backoff, LossReason, State, Supervisor};
-use hyphae_modem::cli::{self, Args, Mode};
+use hyphae_modem::cli::{Args, Mode};
 use hyphae_modem::wds::{self, BearerConfig};
 use hyphae_modem::{dpm, link, netlink, Error};
 
@@ -17,23 +17,15 @@ use hyphae_modem::{dpm, link, netlink, Error};
 /// The supervisor retries forever; a tool a human runs should not.
 const MAX_ATTEMPTS: u32 = 3;
 
-/// Entry point: returns the process exit code.
-pub fn main() -> i32 {
-    let args = match cli::parse(std::env::args().skip(1)) {
-        Ok(args) => args,
-        Err(message) => {
-            eprintln!("hyphae-modem: {message}\n\n{}", cli::usage());
-            return 2;
-        }
-    };
-
+/// Run the requested mode; returns the process exit code.
+///
+/// `--help` and usage errors were already handled where the arguments were
+/// parsed.
+pub fn main(args: Args) -> i32 {
     match &args.mode {
-        Mode::Help => {
-            print!("{}", cli::usage());
-            0
-        }
         Mode::Lookup => lookup(),
         Mode::BringUp { dry_run } => bring_up(&args, *dry_run),
+        Mode::Help => 0,
     }
 }
 
