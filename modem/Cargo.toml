@@ -1,0 +1,18 @@
+[package]
+name = "hyphae-modem"
+description = "QMI over QRTR modem bring-up: namespace lookup, QMI codec, WDS bearer, rtnetlink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The hardware path is opt-in so the IMS and lab builds keep their dependency
+# graph exactly as it is: no sockets, no FFI, nothing.
+[features]
+default = []
+modem-qmi = ["dep:libc"]
+
+[dependencies]
+# Only the syscall declarations. AF_QIPCRTR (42) and NETLINK_ROUTE have no
+# std wrappers, so the two gated modules need `libc`; nothing else does.
+libc = { version = "0.2", optional = true }

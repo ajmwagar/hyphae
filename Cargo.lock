@@ -251,6 +251,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyphae-modem"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ims"
 version = "0.1.0"
 dependencies = [
