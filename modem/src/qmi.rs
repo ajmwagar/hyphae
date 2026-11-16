@@ -338,6 +338,48 @@ mod tests {
     }
 
     #[test]
+    fn encoded_requests_decode_back_to_the_same_message() {
+        // One row per TLV shape the crate sends: none, a string, a little-endian
+        // u32, and an empty value. The frame is built by `encode` and read back
+        // by `decode`, so the two halves of the codec are checked against each
+        // other and not only against captures.
+        let cases = vec![
+            ("no TLVs", Op::new("plain", 0x0021), 1u16, Vec::new()),
+            (
+                "string",
+                Op::new("apn", 0x0020),
+                2,
+                vec![Tlv::string(0x14, "fast.t-mobile.com").unwrap()],
+            ),
+            (
+                "u32",
+                Op::new("settings", 0x002D),
+                3,
+                vec![Tlv::u32_le(0x10, 0x2310)],
+            ),
+            (
+                "empty value",
+                Op::new("flags", 0x0022),
+                4,
+                vec![Tlv::new(0x01, Vec::new())],
+            ),
+        ];
+        for (what, op, transaction, tlvs) in cases {
+            let frame = encode(op, transaction, &tlvs).unwrap();
+            let message = decode(&frame).unwrap();
+            assert_eq!(message.kind, REQUEST, "{what}");
+            assert_eq!(message.transaction, transaction, "{what}");
+            assert_eq!(message.message, op.message, "{what}");
+            assert_eq!(message.tlvs, tlvs, "{what}");
+            assert_eq!(
+                u16::from_le_bytes([frame[5], frame[6]]) as usize,
+                frame.len() - HEADER_LEN,
+                "{what}: the header must declare the TLV bytes that follow"
+            );
+        }
+    }
+
+    #[test]
     fn decode_reads_the_captured_out_of_call_response() {
         // WDS Get Current Settings on a client that owns no call.
         let raw: &[u8] = &[
