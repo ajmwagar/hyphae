@@ -359,6 +359,7 @@ mod sys {
     use std::ffi::CString;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use super::{
@@ -393,15 +394,31 @@ mod sys {
 
     impl Interface {
         /// Open a netlink socket and resolve `name` to an index.
+        ///
+        /// The interface does not exist until the modem opens its BAM DMUX
+        /// channel, which happens just *after* `WDS Start Network` returns, so
+        /// resolving immediately races the kernel workqueue that creates it.
+        /// Wait for it instead: bounded, and only for the name lookup.
         pub fn new(name: &str) -> Result<Self, Error> {
+            const WAIT: Duration = Duration::from_secs(5);
+            const STEP: Duration = Duration::from_millis(50);
+
             let c_name = CString::new(name).map_err(|_| Error::Malformed {
                 what: "interface name contains a NUL byte",
             })?;
-            // SAFETY: `c_name` is NUL-terminated and outlives the call.
-            let ifindex = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-            if ifindex == 0 {
-                return Err(io_error("if_nametoindex", io::Error::last_os_error()));
-            }
+
+            let deadline = Instant::now() + WAIT;
+            let ifindex = loop {
+                // SAFETY: `c_name` is NUL-terminated and outlives the call.
+                let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+                if index != 0 {
+                    break index;
+                }
+                if Instant::now() >= deadline {
+                    return Err(io_error("if_nametoindex", io::Error::last_os_error()));
+                }
+                thread::sleep(STEP);
+            };
 
             // SAFETY: a plain socket(2) call with constant arguments.
             let raw = unsafe {
