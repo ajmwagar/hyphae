@@ -387,50 +387,29 @@ mod sys {
     #[derive(Debug)]
     pub struct Interface {
         fd: OwnedFd,
-        ifindex: u32,
+        /// The interface name, kept because the index cannot be resolved yet:
+        /// see `ifindex`.
+        name: CString,
+        /// `0` until the name resolves. A `Cell` because `configure` takes
+        /// `&self` -- the bearer config is applied through a shared reference.
+        ifindex: Cell<u32>,
         seq: Cell<u32>,
         timeout: Duration,
     }
 
     impl Interface {
-        /// Open a netlink socket and resolve `name` to an index.
+        /// Open a netlink socket. The name is resolved later, on purpose.
         ///
         /// The interface does not exist until the modem opens its BAM DMUX
-        /// channel, which happens just *after* `WDS Start Network` returns, so
-        /// resolving immediately races the kernel workqueue that creates it.
-        /// Wait for it instead: bounded, and only for the name lookup.
-        ///
-        /// The bound is generous on purpose. Five seconds was not enough on
-        /// real hardware — a bearer that had come up fine a minute earlier
-        /// failed here, and the process exited with the call still active, so
-        /// the only symptom was "no wwan0" and no retry.
+        /// channel, which happens just *after* `WDS Start Network` returns --
+        /// and that call has not been made when the bearer is built. Waiting
+        /// here is a deadlock: the tool sat for a minute looking for an
+        /// interface that only the call it had not started yet would create,
+        /// and the call was never started.
         pub fn new(name: &str) -> Result<Self, Error> {
-            const WAIT: Duration = Duration::from_secs(60);
-            const STEP: Duration = Duration::from_millis(100);
-
             let c_name = CString::new(name).map_err(|_| Error::Malformed {
                 what: "interface name contains a NUL byte",
             })?;
-
-            let start = Instant::now();
-            let deadline = start + WAIT;
-            let mut announced = false;
-            let ifindex = loop {
-                // SAFETY: `c_name` is NUL-terminated and outlives the call.
-                let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-                if index != 0 {
-                    break index;
-                }
-                if Instant::now() >= deadline {
-                    return Err(io_error("if_nametoindex", io::Error::last_os_error()))
-;
-                }
-                if !announced && start.elapsed() >= Duration::from_secs(1) {
-                    eprintln!("hyphae-modem: waiting for {name} (the modem creates it when it opens its data channel)");
-                    announced = true;
-                }
-                thread::sleep(STEP);
-            };
 
 
             // SAFETY: a plain socket(2) call with constant arguments.
@@ -465,15 +444,56 @@ mod sys {
 
             Ok(Self {
                 fd,
-                ifindex,
+                name: c_name,
+                ifindex: Cell::new(0),
                 seq: Cell::new(0),
                 timeout: Duration::from_secs(5),
             })
         }
 
-        /// The kernel's index for the interface.
+        /// The kernel's index for the interface, or 0 before it exists.
         pub fn ifindex(&self) -> u32 {
-            self.ifindex
+            self.ifindex.get()
+        }
+
+        /// The interface index, waiting for the interface to appear.
+        ///
+        /// The kernel workqueue that creates `wwan0` runs just after the modem
+        /// accepts the data call, so the first `configure` is what has to be
+        /// patient. The bound is generous because the failure mode is silent:
+        /// an unresolved index leaves a live call with no interface, and the
+        /// only symptom is a bearer that never carries traffic.
+        fn resolve_ifindex(&self) -> Result<u32, Error> {
+            const WAIT: Duration = Duration::from_secs(60);
+            const STEP: Duration = Duration::from_millis(100);
+
+            let cached = self.ifindex.get();
+            if cached != 0 {
+                return Ok(cached);
+            }
+
+            let start = Instant::now();
+            let deadline = start + WAIT;
+            let mut announced = false;
+            loop {
+                // SAFETY: `self.name` is NUL-terminated and outlives the call.
+                let index = unsafe { libc::if_nametoindex(self.name.as_ptr()) };
+                if index != 0 {
+                    self.ifindex.set(index);
+                    return Ok(index);
+                }
+                if Instant::now() >= deadline {
+                    return Err(io_error("if_nametoindex", io::Error::last_os_error()));
+                }
+                if !announced && start.elapsed() >= Duration::from_secs(1) {
+                    eprintln!(
+                        "hyphae-modem: waiting for {} (the modem creates it when it opens its data channel)",
+                        self.name.to_string_lossy()
+                    );
+                    announced = true;
+                }
+                thread::sleep(STEP);
+            }
         }
 
         fn next_seq(&self) -> u32 {
@@ -584,6 +604,7 @@ mod sys {
 
         /// Every IPv4 address currently on this interface.
         fn addresses(&self) -> Result<Vec<AddressEntry>, Error> {
+            let ifindex = self.resolve_ifindex()?;
             let seq = self.next_seq();
             self.send(&dump_addresses(seq))?;
 
@@ -620,7 +641,7 @@ mod sys {
                     if reply.kind != RTM_NEWADDR {
                         continue;
                     }
-                    if let Some(entry) = parse_address_reply(reply.payload, self.ifindex) {
+                    if let Some(entry) = parse_address_reply(reply.payload, ifindex) {
                         entries.push(entry);
                     }
                 }
@@ -630,8 +651,9 @@ mod sys {
 
     impl NetworkConfig for Interface {
         fn configure(&self, config: &BearerConfig) -> Result<(), Error> {
+            let ifindex = self.resolve_ifindex()?;
             let seq = self.next_seq();
-            self.request("RTM_NEWLINK", link_up(seq, self.ifindex), seq)?;
+            self.request("RTM_NEWLINK", link_up(seq, ifindex), seq)?;
 
             // Flush first, so a retry cannot stack addresses on top of a
             // previous partial attempt.
@@ -639,7 +661,7 @@ mod sys {
                 let seq = self.next_seq();
                 self.request_allowing(
                     "RTM_DELADDR",
-                    del_address(seq, self.ifindex, &entry),
+                    del_address(seq, ifindex, &entry),
                     seq,
                     &[libc::ESRCH],
                 )?;
@@ -648,25 +670,26 @@ mod sys {
             let seq = self.next_seq();
             self.request(
                 "RTM_NEWADDR",
-                add_address(seq, self.ifindex, config.address),
+                add_address(seq, ifindex, config.address),
                 seq,
             )?;
 
             let seq = self.next_seq();
             self.request(
                 "RTM_NEWROUTE",
-                add_default_route(seq, self.ifindex, config.gateway),
+                add_default_route(seq, ifindex, config.gateway),
                 seq,
             )?;
             Ok(())
         }
 
         fn clear(&self) -> Result<(), Error> {
+            let ifindex = self.resolve_ifindex()?;
             for entry in self.addresses()? {
                 let seq = self.next_seq();
                 self.request_allowing(
                     "RTM_DELADDR",
-                    del_address(seq, self.ifindex, &entry),
+                    del_address(seq, ifindex, &entry),
                     seq,
                     &[libc::ESRCH],
                 )?;
@@ -674,7 +697,7 @@ mod sys {
             let seq = self.next_seq();
             self.request_allowing(
                 "RTM_DELROUTE",
-                del_default_route(seq, self.ifindex),
+                del_default_route(seq, ifindex),
                 seq,
                 &[libc::ESRCH],
             )?;
@@ -687,9 +710,12 @@ mod sys {
         use super::Interface;
 
         #[test]
-        fn an_unknown_interface_is_rejected() {
-            // Fails in `if_nametoindex`, before any privileged operation.
-            assert!(Interface::new("hyphae-no-such0").is_err());
+        fn an_unknown_interface_is_rejected_when_it_is_used() {
+            // `new` only opens the socket: the interface the modem has not
+            // created yet must be accepted here, or the bearer can never start
+            // the call that creates it. Resolution is what has to fail.
+            let interface = Interface::new("hyphae-no-such0").expect("socket");
+            assert_eq!(interface.ifindex(), 0, "not resolved yet");
         }
     }
 }
