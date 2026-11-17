@@ -32,7 +32,20 @@ pub fn main(args: Args) -> i32 {
 /// Name-service lookup only: one packet per service, no modem state touched.
 fn lookup() -> i32 {
     let mut ok = true;
-    for (name, service) in [("WDS", wds::SERVICE), ("DPM", dpm::SERVICE)] {
+    // Every service a modem of this generation is expected to publish. `LOC`
+    // is the one that answers "do we have GPS": it is the location service,
+    // and a modem that does not publish it has no GNSS to talk to.
+    for (name, service) in [
+        ("WDS", wds::SERVICE),
+        ("DPM", dpm::SERVICE),
+        ("DMS", 0x02),
+        ("NAS", 0x03),
+        ("WMS", 0x05),
+        ("UIM", 0x08),
+        ("PBM", 0x09),
+        ("LOC", 0x0a),
+        ("PDC", 0x24),
+    ] {
         match link::lookup_service(service, link::DEFAULT_TIMEOUT) {
             Ok(addr) => println!("{name}: service {service} at QRTR {addr}"),
             Err(error) => {
